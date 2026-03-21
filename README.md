@@ -1,1 +1,3 @@
-# OpenClaw-Context-Engine
+# OpenClaw Context Engine
+
+Hypergraph Context Engine MVP skeleton for OpenClaw.
