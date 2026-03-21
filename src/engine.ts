@@ -1,4 +1,9 @@
-import type { TaskState } from '../schemas/types';
+import type { TaskState } from '../schemas/types.js';
+import { assembleContext } from './assemble.js';
+import { compactSession } from './compact.js';
+import { createInMemoryEngineState, ingestTranscriptEntry } from './ingest.js';
+import type { PersistableSessionSnapshot, SQLiteStore } from './sqlite-store.js';
+import { materializeTaskState } from './task-state.js';
 
 export interface TranscriptEntryLike {
   id: string;
@@ -19,6 +24,20 @@ export interface AssembleInput {
 export interface AssembleOutput {
   messages: Array<Record<string, unknown>>;
   systemPromptAddition?: string;
+  taskState?: TaskState;
+  bucketSummary?: Array<{ name: string; count: number; budgetTokens: number }>;
+  retrievalSummary?: Array<{
+    nodeId: string;
+    kind?: string;
+    bucket?: string;
+    selected: boolean;
+    finalScore: number;
+    graphScore: number;
+    retrievalScore: number;
+    recencyScore: number;
+    utilityScore: number;
+    redundancyPenalty: number;
+  }>;
 }
 
 export interface CompactOutput {
@@ -26,50 +45,125 @@ export interface CompactOutput {
   notes?: string[];
 }
 
+export interface HypergraphContextEngineOptions {
+  store?: SQLiteStore;
+}
+
 export class HypergraphContextEngine {
+  private readonly state = createInMemoryEngineState();
+  private readonly store?: SQLiteStore;
+
+  constructor(options: HypergraphContextEngineOptions = {}) {
+    this.store = options.store;
+  }
+
   async ingest(sessionId: string, entry: TranscriptEntryLike): Promise<void> {
-    void sessionId;
-    void entry;
-    // TODO:
-    // 1. normalize transcript entry
-    // 2. extract candidate nodes
-    // 3. update DAG
-    // 4. update task state cache
-    // 5. schedule retrieval index update
+    ingestTranscriptEntry(this.state, sessionId, entry);
+    this.persistSession(sessionId);
+  }
+
+  async ingestMany(sessionId: string, entries: TranscriptEntryLike[]): Promise<void> {
+    for (const entry of entries) {
+      ingestTranscriptEntry(this.state, sessionId, entry);
+    }
+
+    this.persistSession(sessionId);
   }
 
   async assemble(input: AssembleInput): Promise<AssembleOutput> {
-    void input;
-    // TODO:
-    // 1. recover current TaskState
-    // 2. run graph recall
-    // 3. run semantic recall
-    // 4. fuse + rerank
-    // 5. fill budget buckets
-    // 6. emit systemPromptAddition
+    const snapshot = this.requireSession(input.sessionId);
+    const result = assembleContext(snapshot, input);
+
     return {
-      messages: [],
-      systemPromptAddition:
-        'HypergraphContextEngine fallback assemble: task-state-guided context assembly not implemented yet.',
+      messages: result.messages,
+      systemPromptAddition: result.systemPromptAddition,
+      taskState: result.taskState,
+      bucketSummary: result.buckets.map((bucket) => ({
+        name: bucket.name,
+        count: bucket.nodeIds.length,
+        budgetTokens: bucket.budgetTokens,
+      })),
+      retrievalSummary: result.retrievalSummary,
     };
   }
 
+  async ingestAndAssemble(
+    sessionId: string,
+    entries: TranscriptEntryLike[],
+    input: Omit<AssembleInput, 'sessionId'>,
+  ): Promise<AssembleOutput> {
+    await this.ingestMany(sessionId, entries);
+    return this.assemble({
+      sessionId,
+      ...input,
+    });
+  }
+
   async compact(sessionId: string): Promise<CompactOutput> {
-    void sessionId;
-    // TODO:
-    // 1. detect stale branches
-    // 2. distill state
-    // 3. consolidate hyperedges
-    // 4. emit SummaryNode
+    const snapshot = this.requireSession(sessionId);
+    if (!snapshot) {
+      return {
+        notes: ['compact skipped: no snapshot for session'],
+      };
+    }
+
+    const computation = compactSession(snapshot);
+    snapshot.nodes.push(computation.summaryNode);
+    this.persistSession(sessionId);
+
     return {
-      notes: ['compact skeleton only'],
+      summaryNodeId: computation.summaryNode.id,
+      notes: computation.notes,
     };
   }
 
   async afterTurn(sessionId: string, taskState?: TaskState): Promise<void> {
-    void sessionId;
     void taskState;
-    // TODO:
-    // async indexing, stale-score updates, low-priority merges, metrics
+    const snapshot = this.requireSession(sessionId);
+    if (!snapshot) {
+      return;
+    }
+
+    // Placeholder for future async indexing hooks.
+    snapshot.transcriptEntries.length = snapshot.transcriptEntries.length;
+    this.persistSession(sessionId);
+  }
+
+  debugSession(sessionId: string) {
+    return this.requireSession(sessionId);
+  }
+
+  private requireSession(sessionId: string): PersistableSessionSnapshot | undefined {
+    const inMemory = this.state.sessions.get(sessionId) as PersistableSessionSnapshot | undefined;
+    if (inMemory) {
+      return inMemory;
+    }
+
+    if (!this.store) {
+      return undefined;
+    }
+
+    const restored = this.store.loadSession(sessionId);
+    if (restored) {
+      this.state.sessions.set(sessionId, restored);
+    }
+
+    return restored;
+  }
+
+  private persistSession(sessionId: string): void {
+    if (!this.store) {
+      return;
+    }
+
+    const snapshot = this.state.sessions.get(sessionId) as PersistableSessionSnapshot | undefined;
+    if (!snapshot) {
+      return;
+    }
+
+    this.store.saveSession({
+      ...snapshot,
+      taskState: materializeTaskState(sessionId, snapshot.nodes, snapshot.edges),
+    });
   }
 }

@@ -94,3 +94,22 @@ the engine should:
 - produce a `TaskState`
 - assemble a compact context package
 - emit a structured `SummaryNode` after compaction
+
+## Current status snapshot
+
+Done:
+- task-state materialization
+- transcript ingest + heuristic semantic node extraction
+- assemble scoring + budget buckets
+- end-to-end toy transcript / demo fixture
+- structured compaction summary node
+
+Still next:
+- richer retrieval (FTS/vector/MMR) beyond in-process scoring
+- richer hyperedge support
+- golden regression snapshots / evaluation harness on top of the new branching fixtures
+- compaction archival policy / stale branch handling beyond summary emission
+
+Recently added:
+- `assemble()` now exposes a small `retrievalSummary` debug surface so demos/tests can inspect why top nodes were selected without digging through internal scorer state
+- a richer branching transcript fixture now exercises explicit `parentId` links, follow-up open loops, and demo-friendly regression coverage

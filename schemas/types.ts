@@ -67,6 +67,7 @@ export interface TaskState {
   toolFacts: string[];
   artifactState: string[];
   openLoops: string[];
+  resolvedOpenLoops: string[];
   relevantMemories: string[];
   confidence: number;
   lastUpdatedAt: string;
@@ -81,6 +82,7 @@ export interface SummaryNodePayload {
   evidenceRefs: string[];
   artifactFinalState: string[];
   openLoopsRemaining: string[];
+  resolvedOpenLoops: string[];
   validUntil?: string;
   confidence: number;
 }
