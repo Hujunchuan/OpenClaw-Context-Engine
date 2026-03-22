@@ -1,4 +1,12 @@
-import type { BaseNode, GraphEdge, PriorityStatusItem, SummaryNodePayload, TaskState } from '../schemas/types.js';
+import type {
+  BaseNode,
+  GraphEdge,
+  MemoryChunkPayload,
+  PriorityStatusItem,
+  RelevantMemoryRef,
+  SummaryNodePayload,
+  TaskState,
+} from '../../schemas/types.js';
 
 const MAX_ITEMS_PER_BUCKET = 8;
 
@@ -136,8 +144,8 @@ export function materializeTaskState(sessionId: string, nodes: BaseNode[], edges
 
   const openLoops = uniqueLimited(explicitOpenLoops);
 
-  const relevantMemories = uniqueLimited([
-    ...memoryNodes.map((node) => readPrimaryText(node.payload) ?? readSecondaryText(node.payload)),
+  const relevantMemories = mergeRelevantMemories([
+    ...memoryNodes.map((node) => toRelevantMemoryRef(node)),
     ...(summarySeed.relevantMemories ?? []),
   ]);
 
@@ -184,7 +192,7 @@ export function mergeTaskState(base: TaskState, patch: Partial<TaskState>): Task
     priorityStatus: mergePriorityStatus([...(base.priorityStatus ?? []), ...(patch.priorityStatus ?? [])]),
     openLoops: uniqueLimited([...(base.openLoops ?? []), ...(patch.openLoops ?? [])]),
     resolvedOpenLoops: uniqueLimited([...(base.resolvedOpenLoops ?? []), ...(patch.resolvedOpenLoops ?? [])]),
-    relevantMemories: uniqueLimited([...(base.relevantMemories ?? []), ...(patch.relevantMemories ?? [])]),
+    relevantMemories: mergeRelevantMemories([...(base.relevantMemories ?? []), ...(patch.relevantMemories ?? [])]),
     confidence: patch.confidence ?? base.confidence,
     lastUpdatedAt: patch.lastUpdatedAt ?? base.lastUpdatedAt,
   };
@@ -209,7 +217,7 @@ function readLatestSummaryTaskState(sessionId: string, nodes: BaseNode[]): TaskS
     priorityStatus: asPriorityStatusArray(payload?.priorityStatus),
     openLoops: asStringArray(payload?.openLoopsRemaining),
     resolvedOpenLoops: asStringArray(payload?.resolvedOpenLoops),
-    relevantMemories: [],
+    relevantMemories: asRelevantMemoryArray(payload?.relevantMemories),
     confidence: isExpiredSummary(latestSummaryNode) ? Number((confidence * 0.5).toFixed(2)) : confidence,
     lastUpdatedAt: latestSummaryNode?.createdAt ?? new Date().toISOString(),
   };
@@ -691,6 +699,75 @@ function asPriorityStatusArray(value: unknown): PriorityStatusItem[] {
       } satisfies PriorityStatusItem;
     })
     .filter((item): item is PriorityStatusItem => Boolean(item));
+}
+
+function toRelevantMemoryRef(node: BaseNode): RelevantMemoryRef {
+  const payload = node.payload as Partial<MemoryChunkPayload> | undefined;
+  return {
+    nodeId: node.id,
+    layer: payload?.layer ?? 'warm',
+    sourceFile: asOptionalString(payload?.sourceFile) ?? 'memory/unknown.md',
+    summary: readPrimaryText(node.payload) ?? readSecondaryText(node.payload) ?? node.id,
+    score: asOptionalNumber(payload?.connectivity) ?? 0,
+    title: asOptionalString(payload?.title),
+    routeReason: asOptionalString(payload?.routeReason),
+  };
+}
+
+function mergeRelevantMemories(values: RelevantMemoryRef[]): RelevantMemoryRef[] {
+  const merged = new Map<string, RelevantMemoryRef>();
+
+  for (const value of values) {
+    if (!value?.summary) {
+      continue;
+    }
+
+    const key = `${value.sourceFile}::${normalizeStateText(value.summary)}`;
+    const existing = merged.get(key);
+    if (!existing || (value.score ?? 0) >= (existing.score ?? 0)) {
+      merged.set(key, value);
+    }
+  }
+
+  return [...merged.values()];
+}
+
+function asRelevantMemoryArray(value: unknown): RelevantMemoryRef[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item, index) => {
+      if (typeof item === 'string') {
+        return {
+          nodeId: `summary-memory:${index}`,
+          layer: 'warm' as const,
+          sourceFile: 'summary',
+          summary: item,
+          score: 0,
+        };
+      }
+
+      if (!item || typeof item !== 'object') {
+        return undefined;
+      }
+
+      const record = item as Record<string, unknown>;
+      const layer = record.layer;
+      return {
+        nodeId: asOptionalString(record.nodeId) ?? `summary-memory:${index}`,
+        layer: layer === 'hot' || layer === 'warm' || layer === 'cold' || layer === 'daily_log' || layer === 'memory_core' || layer === 'archive'
+          ? layer
+          : 'warm',
+        sourceFile: asOptionalString(record.sourceFile) ?? 'summary',
+        summary: asOptionalString(record.summary) ?? '(memory summary)',
+        score: asOptionalNumber(record.score) ?? 0,
+        title: asOptionalString(record.title),
+        routeReason: asOptionalString(record.routeReason),
+      };
+    })
+    .filter((value): value is RelevantMemoryRef => Boolean(value && value.summary));
 }
 
 function asOptionalNumber(value: unknown): number | undefined {

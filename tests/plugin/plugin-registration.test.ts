@@ -4,8 +4,8 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { toyTranscript } from '../fixtures/toy-transcript.js';
-import register from '../index.js';
+import { toyTranscript } from '../../fixtures/toy-transcript.js';
+import register from '../../index.js';
 
 test('plugin registers a context engine under the manifest id', async () => {
   const registrations: Array<{ id: string; factory: () => unknown | Promise<unknown> }> = [];

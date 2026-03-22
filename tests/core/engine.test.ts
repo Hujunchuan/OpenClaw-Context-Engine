@@ -1,16 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { HypergraphContextEngine } from '../src/engine.js';
-import { assembleContext } from '../src/assemble.js';
-import { compactSession } from '../src/compact.js';
-import { extractNodes } from '../src/ingest.js';
-import { retrieveRelevantNodes } from '../src/retriever.js';
-import { SQLiteStore } from '../src/sqlite-store.js';
-import { createEmptyTaskState, materializeTaskState } from '../src/task-state.js';
-import { branchingSessionId, branchingTranscript } from '../fixtures/branching-transcript.js';
-import { runAllDemoScenarios } from '../fixtures/demo-scenarios.js';
-import { toySessionId, toyTranscript } from '../fixtures/toy-transcript.js';
+import { HypergraphContextEngine } from '../../src/core/engine.js';
+import { assembleContext } from '../../src/core/assemble.js';
+import { compactSession } from '../../src/core/compact.js';
+import { extractNodes } from '../../src/core/ingest.js';
+import { retrieveRelevantNodes } from '../../src/core/retriever.js';
+import { SQLiteStore } from '../../src/core/sqlite-store.js';
+import { createEmptyTaskState, materializeTaskState } from '../../src/core/task-state.js';
+import { branchingSessionId, branchingTranscript } from '../../fixtures/branching-transcript.js';
+import { runAllDemoScenarios } from '../../fixtures/demo-scenarios.js';
+import { toySessionId, toyTranscript } from '../../fixtures/toy-transcript.js';
 
 test('createEmptyTaskState provides safe fallback defaults', () => {
   const state = createEmptyTaskState('empty-session', '2026-03-21T00:00:00.000Z');
@@ -688,6 +691,43 @@ test('engine can hydrate from SQLite-backed session state', async () => {
   assert.ok(assembled.messages.length > 0);
   assert.match(assembled.systemPromptAddition ?? '', /Intent:/);
   assert.ok(assembled.retrievalSummary?.length);
+  store.close();
+});
+
+test('engine keeps layered memory transient even when assembling from a SQLite-backed session', async () => {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'openclaw-memory-repo-'));
+  const store = new SQLiteStore(':memory:');
+  const writer = new HypergraphContextEngine({
+    sessionStore: store,
+    memoryWorkspaceRoot: workspaceRoot,
+    enableLayeredRead: true,
+    enableLayeredWrite: true,
+    flushOnAfterTurn: false,
+    flushOnCompact: false,
+  });
+
+  await writer.ingestMany(toySessionId, toyTranscript);
+  await writer.flushMemory(toySessionId, 'manual_save');
+
+  const persisted = store.loadSession(toySessionId);
+  assert.equal(persisted?.nodes.some((node) => node.kind === 'memory_chunk'), false);
+
+  const reader = new HypergraphContextEngine({
+    sessionStore: store,
+    memoryWorkspaceRoot: workspaceRoot,
+    enableLayeredRead: true,
+    enableLayeredWrite: false,
+  });
+  const assembled = await reader.assemble({
+    sessionId: toySessionId,
+    currentTurnText: 'recover layered memory without persisting workspace chunks per session',
+    tokenBudget: 400,
+  });
+
+  assert.ok(assembled.retrievalSummary?.some((candidate) => candidate.layer === 'hot' || candidate.layer === 'warm'));
+
+  const reloaded = store.loadSession(toySessionId);
+  assert.equal(reloaded?.nodes.some((node) => node.kind === 'memory_chunk'), false);
   store.close();
 });
 

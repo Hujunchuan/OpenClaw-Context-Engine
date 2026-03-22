@@ -15,6 +15,30 @@
       "disablePersistence": {
         "type": "boolean",
         "description": "Disable SQLite persistence and keep state in memory only."
+      },
+      "memoryWorkspaceRoot": {
+        "type": "string",
+        "description": "Root directory where NOW.md, MEMORY.md, and memory/hot|warm|cold files are stored."
+      },
+      "enableLayeredRead": {
+        "type": "boolean",
+        "description": "Hydrate layered Markdown memory into memory_chunk nodes before assemble."
+      },
+      "enableLayeredWrite": {
+        "type": "boolean",
+        "description": "Write NOW.md and layered Markdown memory files during flushMemory."
+      },
+      "flushOnAfterTurn": {
+        "type": "boolean",
+        "description": "Automatically flush layered memory after each turn."
+      },
+      "flushOnCompact": {
+        "type": "boolean",
+        "description": "Flush layered memory before compaction runs."
+      },
+      "promoteOnMaintenance": {
+        "type": "boolean",
+        "description": "Re-hydrate and apply lifecycle maintenance during afterTurn."
       }
     }
   }

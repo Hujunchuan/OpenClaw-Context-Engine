@@ -1,17 +1,17 @@
-import { getOrCreateRuntimeAdapter } from './src/runtime-adapter.js';
+import { CONTEXT_ENGINE_PLUGIN_INFO, getOrCreateRuntimeAdapter } from './src/plugin/index.js';
 
 export default function register(api: {
   registerContextEngine: (id: string, factory: (runtimeConfig?: unknown) => unknown | Promise<unknown>) => void;
 }): void {
-  api.registerContextEngine('hypergraph-context-engine', (runtimeConfig?: unknown) => {
+  api.registerContextEngine(CONTEXT_ENGINE_PLUGIN_INFO.id, (runtimeConfig?: unknown) => {
     const adapter = getOrCreateRuntimeAdapter(runtimeConfig as Parameters<typeof getOrCreateRuntimeAdapter>[0]);
 
     return {
       info: {
-        id: 'hypergraph-context-engine',
-        name: 'Hypergraph Context Engine',
-        version: '0.1.0',
-        ownsCompaction: false,
+        id: CONTEXT_ENGINE_PLUGIN_INFO.id,
+        name: CONTEXT_ENGINE_PLUGIN_INFO.name,
+        version: CONTEXT_ENGINE_PLUGIN_INFO.version,
+        ownsCompaction: CONTEXT_ENGINE_PLUGIN_INFO.ownsCompaction,
       },
 
       async ingest(params: {

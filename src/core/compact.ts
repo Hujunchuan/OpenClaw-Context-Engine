@@ -1,4 +1,4 @@
-import type { BaseNode, GraphEdge, SummaryNodePayload } from '../schemas/types.js';
+import type { BaseNode, GraphEdge, SummaryNodePayload } from '../../schemas/types.js';
 import type { SessionSnapshot } from './ingest.js';
 import { materializeTaskState } from './task-state.js';
 
@@ -48,6 +48,7 @@ export function compactSession(snapshot: SessionSnapshot, options: CompactOption
       deriveCompactFollowUp(taskState),
     ]),
     resolvedOpenLoops: taskState.resolvedOpenLoops,
+    relevantMemories: taskState.relevantMemories,
     validUntil: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
     confidence: taskState.confidence,
   };
@@ -134,7 +135,8 @@ function isSummaryEvidenceNode(kind: BaseNode['kind']): boolean {
     || kind === 'decision'
     || kind === 'tool_result'
     || kind === 'artifact_snapshot'
-    || kind === 'open_loop';
+    || kind === 'open_loop'
+    || kind === 'memory_chunk';
 }
 
 function isRawNode(kind: BaseNode['kind']): boolean {

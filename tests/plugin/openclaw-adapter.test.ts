@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toySessionId, toyTranscript } from '../fixtures/toy-transcript.js';
-import { OpenClawHypergraphAdapter } from '../src/openclaw-adapter.js';
+import { toySessionId, toyTranscript } from '../../fixtures/toy-transcript.js';
+import { OpenClawHypergraphAdapter } from '../../src/plugin/openclaw-adapter.js';
 
 test('OpenClawHypergraphAdapter simulates runtime ingest + assemble', async () => {
   const adapter = new OpenClawHypergraphAdapter();

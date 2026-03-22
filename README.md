@@ -1,68 +1,245 @@
 # OpenClaw Context Engine
 
-Hypergraph Context Engine MVP skeleton for OpenClaw.
+Hypergraph Context Engine prototype for OpenClaw, with layered Markdown memory routed through a separate repository boundary.
 
-## Current MVP progress
+## Current shape
 
-Implemented:
-- `src/task-state.ts` - TaskState materialization helpers, now distinguishing unresolved vs resolved historical open loops via graph edges, filtering superseded decisions out of `activeDecisions`, reconciling compact-summary open loops against semantically similar resolved loops, suppressing resolved-loop history again when a later follow-up explicitly reopens the same topic, recovering state from compact summary nodes when raw history is sparse, preferring non-expired summaries over stale compacted ones, normalizing duplicate tool facts into a single canonical fact, dropping constraints that merely duplicate the selected top-level intent, deriving an ordered priority backlog from the latest numbered user list while automatically skipping items already covered by decisions / explicit open loops / resolved history, and exposing ordered `priorityStatus` state (`pending` / `active` / `open_loop` / `resolved`) so downstream assembly/compaction can see progress against the latest explicit priority list instead of only the leftover backlog; concrete artifact evidence now upgrades a covered priority item from merely `active` to `resolved`
-- `src/ingest.ts` - transcript ingestion + heuristic node extraction, with narrower artifact detection so generic user goals / priority lists do not automatically pollute artifact state while concrete file-oriented hints still survive; assistant progress updates that include `Next step:` / `TODO:` / `Blocked on:` now trim open-loop extraction down to the actionable follow-up clause instead of duplicating the whole status sentence, while still preserving the fuller raw status text for relation scoring / artifact detail; explicit completion cues (`done` / `finished` / `resolved`) now mint resolve-worthy decision nodes for follow-up closure and later related open loops can mark the old resolved loop as reopened via `invalidates`; successful `tool_result` output for commit/demo/compact/push steps now also emits progress decisions so task-state can recover those milestones from actual command output instead of only assistant narration
-- `src/retriever.ts` - minimal retrieval abstraction and relevance scoring
-- `src/assemble.ts` - score, bucket, and assemble compact context, now seeding each bucket with its top-ranked candidate when budget allows so task-state / artifact evidence is less likely to disappear under recency-heavy scoring
-- `src/compact.ts` - structured `SummaryNode` emission plus minimal snapshot compaction that trims older raw transcript/message nodes while preserving semantic state, persisting candidate decisions + tool facts into summary payloads, keeping open-loop / artifact evidence refs attached for post-compact re-assembly, and injecting a fresher forward-looking TODO instead of a stale hardcoded SQLite reminder
-- `src/sqlite-store.ts` - minimal SQLite persistence for transcript / nodes / edges / task state
-- `src/engine.ts` - in-memory orchestration wrapper, now with `ingestMany()` + one-shot `ingestAndAssemble()` demo path
-- `src/runtime-adapter.ts` - runtime singleton + default SQLite-backed adapter bootstrap so OpenClaw can survive fresh plugin instances without losing semantic session state
-- `fixtures/toy-transcript.ts` - minimal reusable toy transcript fixture
-- `fixtures/branching-transcript.ts` - richer branching transcript fixture with explicit parent links and follow-up loops
-- `fixtures/demo-scenarios.ts` - reusable end-to-end scenario runner that returns stable fixture snapshots for demos and regression tests
-- `fixtures/toy-demo.ts` - end-to-end ingest → assemble → compact demo across both fixtures
+The repository is now intentionally split into three layers:
 
-Current behavior is intentionally conservative:
-- transcript remains the source of truth
-- extraction is heuristic and explainable
-- assemble degrades to valid empty output when no state exists
-- compaction now emits a traceable summary payload and prunes older raw transcript/message/tool nodes under a small retention budget
-- SQLite persistence now exists as a separate MVP store layer, and the runtime plugin defaults to using it so OpenClaw session memory survives fresh engine instances; retrieval still runs in-process and richer hyperedge reasoning remains TODO
+- `src/core/`
+  Core session engine: ingest, task-state recovery, retrieval, assemble, compact, and SQLite persistence.
+- `src/memory/`
+  Layered Markdown memory: hot/warm/cold routing, workspace reads/writes, lifecycle policy, and transient memory indexing.
+- `src/plugin/`
+  OpenClaw-facing glue: shared config normalization, runtime adapter caching, and plugin registration boundaries.
+
+Tests follow the same split:
+
+- `tests/core/`
+- `tests/memory/`
+- `tests/plugin/`
+
+## How It Connects To OpenClaw
+
+```mermaid
+flowchart TD
+  A["OpenClaw Runtime"] --> B["Context-Engine Slot"]
+  B --> C["hypergraph-context-engine"]
+
+  C --> D["plugin layer"]
+  D --> E["core engine"]
+  E --> F["session state (SQLite)"]
+  E --> G["layered memory (Markdown)"]
+
+  D --> H["ingest"]
+  D --> I["assemble"]
+  D --> J["compact"]
+  D --> K["afterTurn"]
+```
+
+In plain terms:
+
+- OpenClaw still owns the runtime and transcript lifecycle.
+- This plugin replaces the default context-engine behavior through the `context-engine` slot.
+- The plugin layer translates OpenClaw lifecycle calls into this repository's engine methods.
+- The core engine manages session semantics.
+- The memory layer provides hot/warm/cold Markdown memory recall without becoming the session fact source.
+
+## Default vs This Plugin
+
+```mermaid
+flowchart LR
+  subgraph A["OpenClaw Default"]
+    A1["OpenClaw Runtime"] --> A2["default context assembly"]
+    A2 --> A3["recent history / built-in context flow"]
+  end
+
+  subgraph B["This Repository"]
+    B1["OpenClaw Runtime"] --> B2["hypergraph-context-engine"]
+    B2 --> B3["plugin adapter"]
+    B3 --> B4["core assemble / compact / afterTurn"]
+    B4 --> B5["SQLite session state"]
+    B4 --> B6["Markdown layered memory recall"]
+  end
+```
+
+What stays with OpenClaw:
+
+- runtime lifecycle
+- transcript tree
+- plugin loading and slot selection
+
+What this plugin changes:
+
+- how context is assembled
+- how compaction is structured
+- how after-turn maintenance writes and recalls layered memory
+
+## Current behavior
+
+- Transcript remains the primary session fact source.
+- SQLite stores only session-derived semantic state.
+- Markdown workspace stores layered memory facts such as `NOW.md`, `MEMORY.md`, and `memory/hot|warm|cold|archive|YYYY-MM-DD.md`.
+- Assemble fuses session state with recalled layered memory at read time.
+- Layered `memory_chunk` nodes are no longer persisted back into SQLite session snapshots.
 
 ## Quick start
 
 ```bash
 npm install
 npm run check
-npm run test
 npm run demo
+npm run memory:demo
 npm run demo:snapshots
+npm run plugin:check
 ```
 
-## OpenClaw runtime persistence
+`npm test` is included, but in this Windows sandbox it may still fail with `spawn EPERM` before test code runs.
 
-The plugin now prefers a stable runtime session key (`sessionKey` when OpenClaw provides one) and persists semantic state to SQLite by default.
+## Use from code
 
-Path resolution order:
-- plugin/runtime config `dbPath`
+```ts
+import { HypergraphContextEngine } from './src/core/engine.js';
+
+const engine = new HypergraphContextEngine({
+  memoryWorkspaceRoot: 'C:/tmp/openclaw-memory',
+  enableLayeredRead: true,
+  enableLayeredWrite: true,
+  flushOnAfterTurn: true,
+  flushOnCompact: true,
+});
+
+await engine.ingestMany(sessionId, transcriptEntries);
+await engine.flushMemory(sessionId, 'manual_save');
+
+const assembled = await engine.assemble({
+  sessionId,
+  currentTurnText: 'recover layered memory',
+  tokenBudget: 400,
+});
+```
+
+## Layered memory
+
+This repository now supports layered Markdown memory through `src/memory/repository.ts`.
+
+Workspace layout:
+
+- `NOW.md`
+- `MEMORY.md`
+- `memory/hot/*.md`
+- `memory/warm/*.md`
+- `memory/cold/*.md`
+- `memory/archive/*.md`
+- `memory/YYYY-MM-DD.md`
+
+Behavior defaults:
+
+- `NOW.md` tracks current task state and is overwrite-oriented.
+- `memory/hot/*.md` tracks active task/project state.
+- `memory/warm/*.md` stores reusable patterns and workflows.
+- `memory/cold/*.md` stores long-lived background facts and preferences.
+- `MEMORY.md` stays thin and curated.
+- Daily logs are audit-oriented, not the primary retrieval surface.
+
+`npm run memory:demo` creates a temporary workspace, writes layered memory, and prints a `NOW.md` preview.
+
+## OpenClaw plugin use
+
+This repository exposes a `context-engine` plugin via `openclaw.plugin.json`.
+
+- Plugin id: `hypergraph-context-engine`
+- Kind: `context-engine`
+- Runtime entry: `index.ts`
+- Shared plugin config: `src/plugin/config.ts`
+
+Important: this is currently a context-engine plugin with layered memory support, not a standalone `memory` slot plugin.
+
+### Install into OpenClaw
+
+Install this repository as a local plugin:
+
+```powershell
+openclaw plugins install -l "<path-to-your-plugin-repo>"
+```
+
+Then enable it and switch the `contextEngine` slot to this plugin:
+
+```ts
+{
+  plugins: {
+    enabled: true,
+    slots: {
+      contextEngine: "hypergraph-context-engine",
+    },
+    entries: {
+      "hypergraph-context-engine": {
+        enabled: true,
+        config: {
+          memoryWorkspaceRoot: "C:/tmp/openclaw-memory",
+          enableLayeredRead: true,
+          enableLayeredWrite: true,
+          flushOnAfterTurn: true,
+          flushOnCompact: true,
+        },
+      },
+    },
+  },
+}
+```
+
+After updating config, restart OpenClaw Gateway:
+
+```powershell
+openclaw gateway restart
+```
+
+Useful checks:
+
+```powershell
+openclaw plugins list
+openclaw plugins inspect hypergraph-context-engine
+```
+
+Important notes:
+
+- This plugin belongs in `plugins.slots.contextEngine`, not `plugins.slots.memory`.
+- Installing the plugin is not enough by itself; the slot and entry both need to be enabled.
+- For first-time validation, set an explicit `memoryWorkspaceRoot` and confirm that `NOW.md` and `memory/*` are created during a real session.
+
+Config fields:
+
+- `dbPath`
+- `disablePersistence`
+- `memoryWorkspaceRoot`
+- `enableLayeredRead`
+- `enableLayeredWrite`
+- `flushOnAfterTurn`
+- `flushOnCompact`
+- `promoteOnMaintenance`
+
+Environment fallbacks:
+
 - `OPENCLAW_CONTEXT_ENGINE_DB_PATH`
+- `OPENCLAW_CONTEXT_ENGINE_MEMORY_ROOT`
+- `OPENCLAW_CONTEXT_ENGINE_DISABLE_PERSISTENCE`
 - `OPENCLAW_CONTEXT_ENGINE_DATA_DIR`
 - `OPENCLAW_PLUGIN_DATA_DIR`
 - `OPENCLAW_DATA_DIR`
-- OS temp dir fallback: `openclaw-context-engine/hypergraph-context-engine.sqlite`
 
-Set `disablePersistence: true` (or `OPENCLAW_CONTEXT_ENGINE_DISABLE_PERSISTENCE=1`) only if you explicitly want ephemeral in-memory behavior.
+## Verification status
 
-The demo prints, for both the minimal and branching fixtures:
-- assembled context message kinds + recovered `taskState` (including ordered `priorityStatus` alongside the remaining `priorityBacklog`)
-- assemble bucket summary metadata
-- top retrieval explanation metadata (`retrievalSummary`) showing why candidate nodes were selected
-- heuristic graph edge counts created during ingest (useful for debugging `resolves` / `depends_on` / `supersedes` behavior)
-- the compact result metadata + normalized summary payload
-- a post-compact re-assemble pass, to show that summary-backed recovery still returns usable context
-- the stored session ids for the scenario
+The following checks are currently passing:
 
-`npm run demo:snapshots` emits the same scenario data as machine-readable JSON so regression tests can reuse the exact fixture runner instead of maintaining a second golden-path implementation.
+- `npm run check`
+- `npm run plugin:check`
+- `npm run memory:demo`
 
-## Known TODOs
+There is also an additional smoke validation path confirming:
 
-- replace token-overlap heuristics with proper lexical / embedding retrieval
-- promote current heuristic relation edges into richer hyperedges once the schema and reasoning path are ready
-- replace fixed retention heuristics in compact with branch-aware archival / TTL policies
-- shrink artifact extraction noise further for non-English / mixed-language transcripts
+- layered memory is recalled during assemble
+- `memory_chunk` nodes are not persisted into SQLite session snapshots
+
+## Next likely step
+
+The next engineering step is to put a richer retrieval/index layer behind `src/memory/repository.ts` while keeping Markdown as the source of truth. That can be local BM25, vector recall, or a hybrid index, but the repository boundary should stay the same.

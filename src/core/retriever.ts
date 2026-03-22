@@ -1,4 +1,4 @@
-import type { BaseNode, GraphEdge, RetrievalCandidate, TaskState } from '../schemas/types.js';
+import type { BaseNode, GraphEdge, MemoryChunkPayload, RetrievalCandidate, TaskState } from '../../schemas/types.js';
 
 export interface RetrieveInput {
   nodes: BaseNode[];
@@ -40,8 +40,9 @@ export function scoreCandidates(
       const recencyScore = Math.max(0.1, (index + 1) / Math.max(nodes.length, 1));
       const utilityScore = utility(node.kind);
       const redundancyPenalty = index > 0 && nodes[index - 1]?.kind === node.kind ? 0.15 : 0;
+      const layerWeight = resolveLayerWeight(node);
       const finalScore = Number(
-        (0.35 * graphScore + 0.25 * retrievalScore + 0.2 * recencyScore + 0.2 * utilityScore - redundancyPenalty).toFixed(3),
+        ((0.35 * graphScore + 0.25 * retrievalScore + 0.2 * recencyScore + 0.2 * utilityScore) * layerWeight - redundancyPenalty).toFixed(3),
       );
 
       return {
@@ -55,6 +56,30 @@ export function scoreCandidates(
       };
     })
     .sort((a, b) => b.finalScore - a.finalScore);
+}
+
+function resolveLayerWeight(node: BaseNode): number {
+  if (node.kind !== 'memory_chunk') {
+    return 0.35;
+  }
+
+  const payload = node.payload as Partial<MemoryChunkPayload> | undefined;
+  switch (payload?.layer) {
+    case 'hot':
+      return 1;
+    case 'warm':
+      return 0.82;
+    case 'cold':
+      return 0.65;
+    case 'daily_log':
+      return 0.45;
+    case 'archive':
+      return 0.2;
+    case 'memory_core':
+      return 0.65;
+    default:
+      return 0.35;
+  }
 }
 
 function graphAffinity(node: BaseNode, taskState: TaskState, edgeIndex: Map<string, GraphEdge[]>): number {

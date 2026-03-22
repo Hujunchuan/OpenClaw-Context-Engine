@@ -1,4 +1,4 @@
-import type { TranscriptEntryLike } from '../src/engine.js';
+import type { TranscriptEntryLike } from '../src/core/engine.js';
 
 export const toySessionId = 'toy-session';
 
