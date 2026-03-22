@@ -108,7 +108,7 @@ export class HypergraphContextEngine {
     }
 
     const computation = compactSession(snapshot);
-    snapshot.nodes.push(computation.summaryNode);
+    this.state.sessions.set(sessionId, computation.compactedSnapshot as PersistableSessionSnapshot);
     this.persistSession(sessionId);
 
     return {

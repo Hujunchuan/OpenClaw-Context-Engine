@@ -58,6 +58,12 @@ export interface Hyperedge {
   reason?: string;
 }
 
+export interface PriorityStatusItem {
+  item: string;
+  status: 'pending' | 'active' | 'open_loop' | 'resolved';
+  source: 'priority_list' | 'summary';
+}
+
 export interface TaskState {
   sessionId: string;
   intent: string | null;
@@ -66,6 +72,8 @@ export interface TaskState {
   candidateDecisions: string[];
   toolFacts: string[];
   artifactState: string[];
+  priorityBacklog: string[];
+  priorityStatus: PriorityStatusItem[];
   openLoops: string[];
   resolvedOpenLoops: string[];
   relevantMemories: string[];
@@ -79,8 +87,12 @@ export interface SummaryNodePayload {
   intent: string | null;
   constraints: string[];
   finalDecisions: string[];
+  candidateDecisions: string[];
+  toolFacts: string[];
   evidenceRefs: string[];
   artifactFinalState: string[];
+  priorityBacklog: string[];
+  priorityStatus?: PriorityStatusItem[];
   openLoopsRemaining: string[];
   resolvedOpenLoops: string[];
   validUntil?: string;

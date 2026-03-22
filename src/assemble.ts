@@ -1,4 +1,4 @@
-import type { AssembleBucket, BaseNode, RetrievalCandidate, TaskState } from '../schemas/types.js';
+import type { AssembleBucket, BaseNode, RetrievalCandidate, SummaryNodePayload, TaskState } from '../schemas/types.js';
 import type { AssembleInput, AssembleOutput } from './engine.js';
 import type { SessionSnapshot } from './ingest.js';
 import { retrieveRelevantNodes } from './retriever.js';
@@ -59,7 +59,7 @@ export function assembleContext(
   });
   const candidates = retrieval.candidates;
   const buckets = fillBuckets(candidates, snapshot.nodes, input.tokenBudget);
-  const selectedNodeIds = new Set(buckets.flatMap((bucket) => bucket.nodeIds));
+  const selectedNodeIds = expandSelectedNodeIds(buckets, snapshot.nodes);
   const retrievalSummary = candidates.slice(0, 5).map((candidate) => {
     const node = snapshot.nodes.find((item) => item.id === candidate.nodeId);
     const bucket = node ? classifyBucket(node.kind) : undefined;
@@ -92,6 +92,30 @@ export function assembleContext(
   };
 }
 
+function expandSelectedNodeIds(buckets: AssembleBucket[], nodes: BaseNode[]): Set<string> {
+  const selected = new Set(buckets.flatMap((bucket) => bucket.nodeIds));
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+  for (const bucket of buckets) {
+    for (const nodeId of bucket.nodeIds) {
+      const node = nodeMap.get(nodeId);
+      if (!node || node.kind !== 'summary') {
+        continue;
+      }
+
+      const payload = node.payload as Partial<SummaryNodePayload> | undefined;
+      for (const evidenceRef of payload?.evidenceRefs ?? []) {
+        const referencedNode = nodeMap.get(evidenceRef);
+        if (referencedNode) {
+          selected.add(referencedNode.id);
+        }
+      }
+    }
+  }
+
+  return selected;
+}
+
 function fillBuckets(
   candidates: RetrievalCandidate[],
   nodes: BaseNode[],
@@ -100,6 +124,8 @@ function fillBuckets(
   const buckets = createBuckets(tokenBudget);
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
 
+  seedBucketsWithTopCandidates(buckets, candidates, nodeMap);
+
   for (const candidate of candidates) {
     const node = nodeMap.get(candidate.nodeId);
     if (!node) {
@@ -107,7 +133,7 @@ function fillBuckets(
     }
 
     const bucket = buckets.find((item) => item.name === classifyBucket(node.kind));
-    if (!bucket) {
+    if (!bucket || bucket.nodeIds.includes(node.id)) {
       continue;
     }
 
@@ -125,6 +151,61 @@ function fillBuckets(
   }
 
   return buckets;
+}
+
+function seedBucketsWithTopCandidates(
+  buckets: AssembleBucket[],
+  candidates: RetrievalCandidate[],
+  nodeMap: Map<string, BaseNode>,
+): void {
+  for (const bucket of buckets) {
+    const topCandidateForBucket = selectSeedCandidateForBucket(bucket.name, candidates, nodeMap);
+
+    if (!topCandidateForBucket) {
+      continue;
+    }
+
+    const node = nodeMap.get(topCandidateForBucket.nodeId);
+    if (!node) {
+      continue;
+    }
+
+    if (estimateNodeTokens(node) <= bucket.budgetTokens || node.kind === 'summary' || bucket.nodeIds.length === 0) {
+      bucket.nodeIds.push(node.id);
+    }
+  }
+}
+
+function selectSeedCandidateForBucket(
+  bucketName: AssembleBucket['name'],
+  candidates: RetrievalCandidate[],
+  nodeMap: Map<string, BaseNode>,
+): RetrievalCandidate | undefined {
+  const bucketCandidates = candidates.filter((candidate) => {
+    const node = nodeMap.get(candidate.nodeId);
+    return node && classifyBucket(node.kind) === bucketName;
+  });
+
+  if (bucketName === 'evidence') {
+    const freshestSummaryNode = [...nodeMap.values()]
+      .filter((node) => node.kind === 'summary')
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+
+    if (freshestSummaryNode) {
+      return bucketCandidates.find((candidate) => candidate.nodeId === freshestSummaryNode.id)
+        ?? {
+          nodeId: freshestSummaryNode.id,
+          graphScore: 1,
+          retrievalScore: 0,
+          recencyScore: 1,
+          utilityScore: 0.95,
+          redundancyPenalty: 0,
+          finalScore: 0.74,
+        };
+    }
+  }
+
+  return bucketCandidates[0];
 }
 
 function createBuckets(tokenBudget: number): AssembleBucket[] {
@@ -146,6 +227,10 @@ function buildSystemPrompt(taskState: TaskState, buckets: AssembleBucket[]): str
     taskState.intent ? `Intent: ${taskState.intent}` : 'Intent: unknown',
     taskState.constraints.length ? `Constraints: ${taskState.constraints.join(' | ')}` : undefined,
     taskState.activeDecisions.length ? `Active decisions: ${taskState.activeDecisions.join(' | ')}` : undefined,
+    taskState.priorityStatus.length
+      ? `Priority status: ${taskState.priorityStatus.map((item) => `${item.item} [${item.status}]`).join(' | ')}`
+      : undefined,
+    taskState.priorityBacklog.length ? `Priority backlog: ${taskState.priorityBacklog.join(' | ')}` : undefined,
     taskState.openLoops.length ? `Open loops: ${taskState.openLoops.join(' | ')}` : undefined,
     taskState.resolvedOpenLoops.length ? `Resolved loops: ${taskState.resolvedOpenLoops.join(' | ')}` : undefined,
     bucketSummary ? `Buckets: ${bucketSummary}` : undefined,

@@ -63,6 +63,8 @@ function graphAffinity(node: BaseNode, taskState: TaskState, edgeIndex: Map<stri
     taskState.intent,
     ...taskState.constraints,
     ...taskState.activeDecisions,
+    ...taskState.priorityStatus.map((item) => item.item),
+    ...taskState.priorityBacklog,
     ...taskState.openLoops,
     ...taskState.artifactState,
   ]
@@ -147,7 +149,7 @@ function utility(kind: BaseNode['kind']): number {
     case 'artifact_snapshot':
       return 0.85;
     case 'summary':
-      return 0.8;
+      return 0.95;
     default:
       return 0.55;
   }
