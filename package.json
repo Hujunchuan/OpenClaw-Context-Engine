@@ -8,6 +8,7 @@
     "demo": "node --loader ts-node/esm src/demo.ts",
     "compare": "node --loader ts-node/esm src/legacy-vs-hypergraph.ts",
     "demo:snapshots": "node --loader ts-node/esm -e \"import('./fixtures/demo-scenarios.ts').then(async ({ runAllDemoScenarios }) => console.log(JSON.stringify(await runAllDemoScenarios(), null, 2)))\"",
+    "runtime:demo": "node --loader ts-node/esm src/adapter-runtime-demo.ts",
     "test": "node --loader ts-node/esm --test tests/**/*.test.ts",
     "plugin:check": "node --loader ts-node/esm -e \"import('./src/openclaw-adapter.ts').then(() => console.log('adapter-ok'))\""
   },
