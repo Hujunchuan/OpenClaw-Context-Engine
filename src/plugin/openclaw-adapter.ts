@@ -1,9 +1,12 @@
-import type { TaskState } from '../schemas/types.js';
+import type { FlushReason, TaskState } from '../../schemas/types.js';
 import {
   HypergraphContextEngine,
   type AssembleOutput,
+  type HypergraphContextEngineOptions,
   type TranscriptEntryLike,
-} from './engine.js';
+} from '../core/engine.js';
+import type { MemoryRepository } from '../memory/repository.js';
+import type { SQLiteStore } from '../core/sqlite-store.js';
 
 export interface OpenClawAdapterAssembleParams {
   sessionId: string;
@@ -26,6 +29,19 @@ export interface OpenClawAdapterCompactResult {
   notes?: string[];
 }
 
+export interface OpenClawHypergraphAdapterOptions {
+  engine?: HypergraphContextEngine;
+  sessionStore?: SQLiteStore;
+  store?: SQLiteStore;
+  memoryRepository?: MemoryRepository;
+  memoryWorkspaceRoot?: string;
+  enableLayeredRead?: boolean;
+  enableLayeredWrite?: boolean;
+  flushOnAfterTurn?: boolean;
+  flushOnCompact?: boolean;
+  promoteOnMaintenance?: boolean;
+}
+
 /**
  * Adapter layer between the prototype HypergraphContextEngine and an eventual
  * OpenClaw runtime context-engine contract.
@@ -35,7 +51,11 @@ export interface OpenClawAdapterCompactResult {
  * the plugin into the real runtime.
  */
 export class OpenClawHypergraphAdapter {
-  constructor(private readonly engine: HypergraphContextEngine = new HypergraphContextEngine()) {}
+  private readonly engine: HypergraphContextEngine;
+
+  constructor(options: OpenClawHypergraphAdapterOptions = {}) {
+    this.engine = options.engine ?? new HypergraphContextEngine(toEngineOptions(options));
+  }
 
   async ingest(params: { sessionId: string; entry: TranscriptEntryLike }): Promise<void> {
     await this.engine.ingest(params.sessionId, normalizeTranscriptEntry(params.entry));
@@ -93,9 +113,26 @@ export class OpenClawHypergraphAdapter {
     return this.engine.compact(params.sessionId);
   }
 
+  async flushMemory(params: { sessionId: string; reason: FlushReason }): Promise<{ writtenFiles: string[]; notes: string[] }> {
+    return this.engine.flushMemory(params.sessionId, params.reason);
+  }
+
   async afterTurn(params: { sessionId: string; taskState?: TaskState }): Promise<void> {
     await this.engine.afterTurn(params.sessionId, params.taskState);
   }
+}
+
+function toEngineOptions(options: OpenClawHypergraphAdapterOptions): HypergraphContextEngineOptions {
+  return {
+    sessionStore: options.sessionStore ?? options.store,
+    memoryRepository: options.memoryRepository,
+    memoryWorkspaceRoot: options.memoryWorkspaceRoot,
+    enableLayeredRead: options.enableLayeredRead,
+    enableLayeredWrite: options.enableLayeredWrite,
+    flushOnAfterTurn: options.flushOnAfterTurn,
+    flushOnCompact: options.flushOnCompact,
+    promoteOnMaintenance: options.promoteOnMaintenance,
+  };
 }
 
 function normalizeTranscriptEntry(entry: TranscriptEntryLike): TranscriptEntryLike {

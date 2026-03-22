@@ -1,6 +1,6 @@
 import { toySessionId, toyTranscript } from '../fixtures/toy-transcript.js';
-import { HypergraphContextEngine } from './engine.js';
-import { compactSession } from './compact.js';
+import { compactSession } from './core/compact.js';
+import { HypergraphContextEngine } from './core/engine.js';
 
 function section(title: string): void {
   console.log(`\n${'='.repeat(16)} ${title} ${'='.repeat(16)}`);

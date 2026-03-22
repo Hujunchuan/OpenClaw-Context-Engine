@@ -1,5 +1,5 @@
 import { toySessionId, toyTranscript } from '../fixtures/toy-transcript.js';
-import { OpenClawHypergraphAdapter } from './openclaw-adapter.js';
+import { OpenClawHypergraphAdapter } from './plugin/openclaw-adapter.js';
 
 function section(title: string): void {
   console.log(`\n${'='.repeat(16)} ${title} ${'='.repeat(16)}`);

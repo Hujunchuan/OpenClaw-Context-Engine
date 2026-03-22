@@ -25,6 +25,62 @@ export type HyperedgeKind =
   | 'resolves'
   | 'invalidates';
 
+export type MemoryLayer =
+  | 'hot'
+  | 'warm'
+  | 'cold'
+  | 'daily_log'
+  | 'memory_core'
+  | 'archive';
+
+export type MemoryScope =
+  | 'task'
+  | 'project'
+  | 'workflow'
+  | 'user'
+  | 'system';
+
+export type FlushReason =
+  | 'turn_end'
+  | 'tool_complete'
+  | 'stage_complete'
+  | 'compaction'
+  | 'manual_save'
+  | 'manual_reset'
+  | 'manual_new';
+
+export interface RelevantMemoryRef {
+  nodeId: string;
+  layer: MemoryLayer;
+  sourceFile: string;
+  summary: string;
+  score: number;
+  title?: string;
+  routeReason?: string;
+}
+
+export interface MemoryChunkPayload extends Record<string, unknown> {
+  layer: MemoryLayer;
+  scope: MemoryScope;
+  sourceFile: string;
+  title: string;
+  summary: string;
+  text?: string;
+  category?: string;
+  routeReason?: string;
+  dedupeKey: string;
+  persistence: 'turn' | 'task' | 'project' | 'long_term';
+  recurrence: number;
+  connectivity: number;
+  activationEnergy: 'low' | 'medium' | 'high';
+  status: 'active' | 'archived' | 'invalidated';
+  updatedAt: string;
+  firstSeenAt?: string;
+  hitCount?: number;
+  sessionCount?: number;
+  lastSessionId?: string;
+}
+
 export interface BaseNode {
   id: string;
   kind: NodeKind;
@@ -76,7 +132,7 @@ export interface TaskState {
   priorityStatus: PriorityStatusItem[];
   openLoops: string[];
   resolvedOpenLoops: string[];
-  relevantMemories: string[];
+  relevantMemories: RelevantMemoryRef[];
   confidence: number;
   lastUpdatedAt: string;
 }
@@ -95,6 +151,7 @@ export interface SummaryNodePayload {
   priorityStatus?: PriorityStatusItem[];
   openLoopsRemaining: string[];
   resolvedOpenLoops: string[];
+  relevantMemories?: RelevantMemoryRef[];
   validUntil?: string;
   confidence: number;
 }

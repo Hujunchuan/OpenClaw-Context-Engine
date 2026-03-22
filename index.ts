@@ -1,17 +1,17 @@
-import { OpenClawHypergraphAdapter } from './src/openclaw-adapter.js';
+import { CONTEXT_ENGINE_PLUGIN_INFO, getOrCreateRuntimeAdapter } from './src/plugin/index.js';
 
 export default function register(api: {
-  registerContextEngine: (id: string, factory: () => unknown | Promise<unknown>) => void;
+  registerContextEngine: (id: string, factory: (runtimeConfig?: unknown) => unknown | Promise<unknown>) => void;
 }): void {
-  api.registerContextEngine('hypergraph-context-engine', () => {
-    const adapter = new OpenClawHypergraphAdapter();
+  api.registerContextEngine(CONTEXT_ENGINE_PLUGIN_INFO.id, (runtimeConfig?: unknown) => {
+    const adapter = getOrCreateRuntimeAdapter(runtimeConfig as Parameters<typeof getOrCreateRuntimeAdapter>[0]);
 
     return {
       info: {
-        id: 'hypergraph-context-engine',
-        name: 'Hypergraph Context Engine',
-        version: '0.1.0',
-        ownsCompaction: false,
+        id: CONTEXT_ENGINE_PLUGIN_INFO.id,
+        name: CONTEXT_ENGINE_PLUGIN_INFO.name,
+        version: CONTEXT_ENGINE_PLUGIN_INFO.version,
+        ownsCompaction: CONTEXT_ENGINE_PLUGIN_INFO.ownsCompaction,
       },
 
       async ingest(params: {
@@ -20,8 +20,9 @@ export default function register(api: {
         message: Record<string, unknown>;
         isHeartbeat?: boolean;
       }) {
+        const runtimeSessionId = getRuntimeSessionId(params);
         await adapter.ingest({
-          sessionId: params.sessionId,
+          sessionId: runtimeSessionId,
           entry: {
             ...(params.message ?? {}),
             id: String((params.message as { id?: unknown })?.id ?? crypto.randomUUID()),
@@ -38,8 +39,9 @@ export default function register(api: {
         messages: Array<Record<string, unknown>>;
         isHeartbeat?: boolean;
       }) {
+        const runtimeSessionId = getRuntimeSessionId(params);
         await adapter.ingestMany({
-          sessionId: params.sessionId,
+          sessionId: runtimeSessionId,
           entries: (params.messages ?? []).map((message) => ({
             ...message,
             id: String((message as { id?: unknown })?.id ?? crypto.randomUUID()),
@@ -56,9 +58,10 @@ export default function register(api: {
         messages: Array<Record<string, unknown>>;
         tokenBudget?: number;
       }) {
+        const runtimeSessionId = getRuntimeSessionId(params);
         const currentTurnText = extractLatestUserText(params.messages ?? []);
         const result = await adapter.assemble({
-          sessionId: params.sessionId,
+          sessionId: runtimeSessionId,
           currentTurnText,
           tokenBudget: params.tokenBudget ?? 4000,
         });
@@ -81,7 +84,8 @@ export default function register(api: {
         customInstructions?: string;
         runtimeContext?: Record<string, unknown>;
       }) {
-        const result = await adapter.compact({ sessionId: params.sessionId });
+        const runtimeSessionId = getRuntimeSessionId(params);
+        const result = await adapter.compact({ sessionId: runtimeSessionId });
         return {
           ok: true,
           compacted: Boolean(result.summaryNodeId),
@@ -114,10 +118,15 @@ export default function register(api: {
         tokenBudget?: number;
         runtimeContext?: Record<string, unknown>;
       }) {
-        await adapter.afterTurn({ sessionId: params.sessionId });
+        const runtimeSessionId = getRuntimeSessionId(params);
+        await adapter.afterTurn({ sessionId: runtimeSessionId });
       },
     };
   });
+}
+
+function getRuntimeSessionId(params: { sessionId: string; sessionKey?: string }): string {
+  return String(params.sessionKey ?? params.sessionId);
 }
 
 function extractLatestUserText(messages: Array<Record<string, unknown>>): string | undefined {

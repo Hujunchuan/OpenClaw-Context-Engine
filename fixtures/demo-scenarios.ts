@@ -1,7 +1,7 @@
 import type { SummaryNodePayload } from '../schemas/types.js';
-import { HypergraphContextEngine } from '../src/engine.js';
-import type { TranscriptEntryLike } from '../src/engine.js';
-import { SQLiteStore } from '../src/sqlite-store.js';
+import { HypergraphContextEngine } from '../src/core/engine.js';
+import type { TranscriptEntryLike } from '../src/core/engine.js';
+import { SQLiteStore } from '../src/core/sqlite-store.js';
 import { branchingSessionId, branchingTranscript } from './branching-transcript.js';
 import { toySessionId, toyTranscript } from './toy-transcript.js';
 

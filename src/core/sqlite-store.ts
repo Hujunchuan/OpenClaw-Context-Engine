@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { BaseNode, GraphEdge, Hyperedge, TaskState } from '../schemas/types.js';
+import type { BaseNode, GraphEdge, Hyperedge, TaskState } from '../../schemas/types.js';
 import type { SessionSnapshot } from './ingest.js';
 import type { TranscriptEntryLike } from './engine.js';
 

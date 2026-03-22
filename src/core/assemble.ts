@@ -1,4 +1,4 @@
-import type { AssembleBucket, BaseNode, RetrievalCandidate, SummaryNodePayload, TaskState } from '../schemas/types.js';
+import type { AssembleBucket, BaseNode, MemoryChunkPayload, RetrievalCandidate, SummaryNodePayload, TaskState } from '../../schemas/types.js';
 import type { AssembleInput, AssembleOutput } from './engine.js';
 import type { SessionSnapshot } from './ingest.js';
 import { retrieveRelevantNodes } from './retriever.js';
@@ -16,6 +16,9 @@ export interface RetrievalSummaryItem {
   nodeId: string;
   kind?: string;
   bucket?: string;
+  layer?: string;
+  sourceFile?: string;
+  routeReason?: string;
   selected: boolean;
   finalScore: number;
   graphScore: number;
@@ -68,6 +71,9 @@ export function assembleContext(
       nodeId: candidate.nodeId,
       kind: node?.kind,
       bucket,
+      layer: readLayer(node),
+      sourceFile: readSourceFile(node),
+      routeReason: readRouteReason(node),
       selected: selectedNodeIds.has(candidate.nodeId),
       finalScore: candidate.finalScore,
       graphScore: candidate.graphScore,
@@ -205,6 +211,12 @@ function selectSeedCandidateForBucket(
     }
   }
 
+  if (bucketName === 'memory_patch') {
+    return bucketCandidates
+      .sort((left, right) => compareMemoryLayerPriority(nodeMap.get(left.nodeId), nodeMap.get(right.nodeId)))
+      .at(0);
+  }
+
   return bucketCandidates[0];
 }
 
@@ -270,4 +282,46 @@ function nodeToMessage(node: BaseNode): Record<string, unknown> {
     createdAt: node.createdAt,
     content: node.payload,
   };
+}
+
+function readLayer(node: BaseNode | undefined): string | undefined {
+  if (!node || node.kind !== 'memory_chunk') {
+    return undefined;
+  }
+
+  return (node.payload as Partial<MemoryChunkPayload> | undefined)?.layer;
+}
+
+function readSourceFile(node: BaseNode | undefined): string | undefined {
+  if (!node || node.kind !== 'memory_chunk') {
+    return undefined;
+  }
+
+  return (node.payload as Partial<MemoryChunkPayload> | undefined)?.sourceFile;
+}
+
+function readRouteReason(node: BaseNode | undefined): string | undefined {
+  if (!node || node.kind !== 'memory_chunk') {
+    return undefined;
+  }
+
+  return (node.payload as Partial<MemoryChunkPayload> | undefined)?.routeReason;
+}
+
+function compareMemoryLayerPriority(left: BaseNode | undefined, right: BaseNode | undefined): number {
+  return layerPriority(right) - layerPriority(left);
+}
+
+function layerPriority(node: BaseNode | undefined): number {
+  const layer = readLayer(node);
+  switch (layer) {
+    case 'hot':
+      return 3;
+    case 'warm':
+      return 2;
+    case 'cold':
+      return 1;
+    default:
+      return 0;
+  }
 }
