@@ -12,6 +12,7 @@ Implemented:
 - `src/compact.ts` - structured `SummaryNode` emission plus minimal snapshot compaction that trims older raw transcript/message nodes while preserving semantic state, persisting candidate decisions + tool facts into summary payloads, keeping open-loop / artifact evidence refs attached for post-compact re-assembly, and injecting a fresher forward-looking TODO instead of a stale hardcoded SQLite reminder
 - `src/sqlite-store.ts` - minimal SQLite persistence for transcript / nodes / edges / task state
 - `src/engine.ts` - in-memory orchestration wrapper, now with `ingestMany()` + one-shot `ingestAndAssemble()` demo path
+- `src/runtime-adapter.ts` - runtime singleton + default SQLite-backed adapter bootstrap so OpenClaw can survive fresh plugin instances without losing semantic session state
 - `fixtures/toy-transcript.ts` - minimal reusable toy transcript fixture
 - `fixtures/branching-transcript.ts` - richer branching transcript fixture with explicit parent links and follow-up loops
 - `fixtures/demo-scenarios.ts` - reusable end-to-end scenario runner that returns stable fixture snapshots for demos and regression tests
@@ -22,7 +23,7 @@ Current behavior is intentionally conservative:
 - extraction is heuristic and explainable
 - assemble degrades to valid empty output when no state exists
 - compaction now emits a traceable summary payload and prunes older raw transcript/message/tool nodes under a small retention budget
-- SQLite persistence now exists as a separate MVP store layer; retrieval still runs in-process and richer hyperedge reasoning remains TODO
+- SQLite persistence now exists as a separate MVP store layer, and the runtime plugin defaults to using it so OpenClaw session memory survives fresh engine instances; retrieval still runs in-process and richer hyperedge reasoning remains TODO
 
 ## Quick start
 
@@ -33,6 +34,20 @@ npm run test
 npm run demo
 npm run demo:snapshots
 ```
+
+## OpenClaw runtime persistence
+
+The plugin now prefers a stable runtime session key (`sessionKey` when OpenClaw provides one) and persists semantic state to SQLite by default.
+
+Path resolution order:
+- plugin/runtime config `dbPath`
+- `OPENCLAW_CONTEXT_ENGINE_DB_PATH`
+- `OPENCLAW_CONTEXT_ENGINE_DATA_DIR`
+- `OPENCLAW_PLUGIN_DATA_DIR`
+- `OPENCLAW_DATA_DIR`
+- OS temp dir fallback: `openclaw-context-engine/hypergraph-context-engine.sqlite`
+
+Set `disablePersistence: true` (or `OPENCLAW_CONTEXT_ENGINE_DISABLE_PERSISTENCE=1`) only if you explicitly want ephemeral in-memory behavior.
 
 The demo prints, for both the minimal and branching fixtures:
 - assembled context message kinds + recovered `taskState` (including ordered `priorityStatus` alongside the remaining `priorityBacklog`)

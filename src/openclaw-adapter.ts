@@ -4,6 +4,7 @@ import {
   type AssembleOutput,
   type TranscriptEntryLike,
 } from './engine.js';
+import type { SQLiteStore } from './sqlite-store.js';
 
 export interface OpenClawAdapterAssembleParams {
   sessionId: string;
@@ -26,6 +27,11 @@ export interface OpenClawAdapterCompactResult {
   notes?: string[];
 }
 
+export interface OpenClawHypergraphAdapterOptions {
+  engine?: HypergraphContextEngine;
+  store?: SQLiteStore;
+}
+
 /**
  * Adapter layer between the prototype HypergraphContextEngine and an eventual
  * OpenClaw runtime context-engine contract.
@@ -35,7 +41,11 @@ export interface OpenClawAdapterCompactResult {
  * the plugin into the real runtime.
  */
 export class OpenClawHypergraphAdapter {
-  constructor(private readonly engine: HypergraphContextEngine = new HypergraphContextEngine()) {}
+  private readonly engine: HypergraphContextEngine;
+
+  constructor(options: OpenClawHypergraphAdapterOptions = {}) {
+    this.engine = options.engine ?? new HypergraphContextEngine({ store: options.store });
+  }
 
   async ingest(params: { sessionId: string; entry: TranscriptEntryLike }): Promise<void> {
     await this.engine.ingest(params.sessionId, normalizeTranscriptEntry(params.entry));

@@ -7,6 +7,15 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "Optional absolute or relative SQLite path for persisted semantic state."
+      },
+      "disablePersistence": {
+        "type": "boolean",
+        "description": "Disable SQLite persistence and keep state in memory only."
+      }
+    }
   }
 }
