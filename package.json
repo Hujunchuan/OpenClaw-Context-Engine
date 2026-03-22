@@ -10,7 +10,7 @@
     "demo:snapshots": "node --loader ts-node/esm -e \"import('./fixtures/demo-scenarios.ts').then(async ({ runAllDemoScenarios }) => console.log(JSON.stringify(await runAllDemoScenarios(), null, 2)))\"",
     "runtime:demo": "node --loader ts-node/esm src/adapter-runtime-demo.ts",
     "test": "node --loader ts-node/esm --test tests/**/*.test.ts",
-    "plugin:check": "node --loader ts-node/esm -e \"import('./src/openclaw-adapter.ts').then(() => console.log('adapter-ok'))\""
+    "plugin:check": "node --loader ts-node/esm -e \"import('./index.ts').then(m => { const regs=[]; m.default({ registerContextEngine(id, factory){ regs.push({ id, factory }); }}); console.log(regs[0]?.id ?? 'no-registration'); })\""
   },
   "devDependencies": {
     "ts-node": "^10.9.2",
