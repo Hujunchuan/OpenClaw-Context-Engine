@@ -24,6 +24,11 @@ export interface WriteFlushResult {
   writtenFiles: string[];
 }
 
+export interface WriteMaintenanceParams {
+  entries: StoredMemoryEntry[];
+  now?: string;
+}
+
 export class LayeredMemoryWorkspaceStore {
   constructor(public readonly rootDir: string) {}
 
@@ -101,6 +106,13 @@ export class LayeredMemoryWorkspaceStore {
     const memoryPath = resolve(this.rootDir, 'MEMORY.md');
     writeFileSync(memoryPath, renderMemoryCoreSummary(allEntries), 'utf8');
     writtenFiles.push('MEMORY.md');
+
+    return { writtenFiles: uniqueStrings(writtenFiles) };
+  }
+
+  writeMaintenance(params: WriteMaintenanceParams): WriteFlushResult {
+    mkdirSync(this.rootDir, { recursive: true });
+    const writtenFiles = this.rewriteLayeredEntries(params.entries);
 
     return { writtenFiles: uniqueStrings(writtenFiles) };
   }
@@ -216,6 +228,66 @@ export class LayeredMemoryWorkspaceStore {
       unlinkSync(fullPath);
     }
   }
+
+  private rewriteLayeredEntries(
+    entries: StoredMemoryEntry[],
+  ): string[] {
+    const writtenFiles: string[] = [];
+    const managedFiles = this.collectManagedLayerFiles();
+    for (const relativePath of managedFiles) {
+      this.deleteIfExists(relativePath);
+    }
+
+    const persistedEntries = entries
+      .filter((entry) => isPersistedLayer(entry.layer))
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+
+    for (const entry of persistedEntries) {
+      const relativePath = resolveMemoryRelativePath({
+        layer: entry.layer,
+        category: entry.category,
+        dedupeKey: entry.dedupeKey,
+      });
+      const fullPath = resolve(this.rootDir, relativePath);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(
+        fullPath,
+        renderMemoryEntry({
+          ...entry,
+          relativePath,
+          sourceFile: relativePath,
+          content: entry.content || entry.text || entry.summary,
+        }),
+        'utf8',
+      );
+      writtenFiles.push(relativePath);
+    }
+
+    const memoryPath = resolve(this.rootDir, 'MEMORY.md');
+    writeFileSync(memoryPath, renderMemoryCoreSummary([...entries, ...persistedEntries]), 'utf8');
+    writtenFiles.push('MEMORY.md');
+
+    return writtenFiles;
+  }
+
+  private collectManagedLayerFiles(): string[] {
+    if (!existsSync(this.rootDir)) {
+      return [];
+    }
+
+    return this.collectMarkdownFiles(this.rootDir)
+      .map((filePath) => relative(this.rootDir, filePath).replace(/\\/g, '/'))
+      .filter((relativePath) =>
+        relativePath.startsWith('memory/hot/')
+        || relativePath.startsWith('memory/warm/')
+        || relativePath.startsWith('memory/cold/')
+        || relativePath.startsWith('memory/archive/'),
+      );
+  }
+}
+
+function isPersistedLayer(layer: MemoryLayer): boolean {
+  return layer === 'hot' || layer === 'warm' || layer === 'cold' || layer === 'archive';
 }
 
 function renderNowDocument(state: NowDocumentState): string {

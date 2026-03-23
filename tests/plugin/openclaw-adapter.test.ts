@@ -36,6 +36,12 @@ test('OpenClawHypergraphAdapter compact returns a traceable summary node id', as
   const compacted = await adapter.compact({ sessionId: toySessionId });
 
   assert.match(compacted.summaryNodeId ?? '', /summary/);
+  assert.match(compacted.firstKeptEntryId ?? '', /u\d|a\d|t\d/i);
+  assert.ok((compacted.tokensBefore ?? 0) > 0);
+  if (compacted.tokensAfter != null) {
+    assert.ok(compacted.tokensAfter > 0);
+    assert.ok(compacted.tokensAfter < (compacted.tokensBefore ?? Number.MAX_SAFE_INTEGER));
+  }
   assert.ok((compacted.notes?.length ?? 0) > 0);
 });
 

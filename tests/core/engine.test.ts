@@ -85,6 +85,62 @@ test('extractNodes trims assistant progress updates down to the actionable next-
   assert.equal(artifact?.payload.summary, 'Added fixtures/demo-scenarios.ts and updated toy-demo output');
 });
 
+test('extractNodes ignores runtime thinking and tool-call content while keeping visible next-step text', () => {
+  const nodes = extractNodes('runtime-structured-open-loop-session', {
+    id: 'a-structured',
+    role: 'assistant',
+    type: 'message',
+    createdAt: '2026-03-23T07:51:28.359Z',
+    content: [
+      {
+        type: 'thinking',
+        thinking: 'The user is asking about the current task and next step.',
+        thinkingSignature: 'abc123',
+      },
+      {
+        type: 'toolCall',
+        id: 'call-1',
+        name: 'memory_search',
+        arguments: {
+          query: 'current task next step',
+        },
+      },
+      {
+        type: 'output_text',
+        text: 'Next step: ** Confirm memory flush works',
+      },
+    ],
+  });
+
+  const openLoop = nodes.find((node) => node.kind === 'open_loop');
+  const message = nodes.find((node) => node.kind === 'message');
+
+  assert.equal(openLoop?.payload.text, 'Confirm memory flush works');
+  assert.equal(message?.payload.text, 'Next step: ** Confirm memory flush works');
+  assert.equal(
+    String(message?.payload.text).includes('thinkingSignature'),
+    false,
+  );
+  assert.equal(
+    String(message?.payload.text).includes('toolCall'),
+    false,
+  );
+});
+
+test('extractNodes does not turn generic recall questions into open loops', () => {
+  const nodes = extractNodes('generic-question-session', {
+    id: 'u-question',
+    role: 'user',
+    type: 'message',
+    createdAt: '2026-03-23T08:01:56.890Z',
+    content: '[Mon 2026-03-23 16:01 GMT+8] What is the current task and the next step I asked you to remember?',
+  });
+
+  assert.equal(nodes.some((node) => node.kind === 'open_loop'), false);
+  const state = materializeTaskState('generic-question-session', nodes);
+  assert.equal(state.intent, 'What is the current task and the next step I asked you to remember?');
+});
+
 test('extractNodes trims blocked and todo suffixes out of assistant semantic state', () => {
   const nodes = extractNodes('blocked-progress-session', {
     id: 'a1',
@@ -258,6 +314,52 @@ test('materializeTaskState avoids duplicating the top intent as a constraint', (
 
   assert.ok(state.intent);
   assert.ok(state.constraints.every((value) => value !== state.intent));
+});
+
+test('materializeTaskState drops transient runtime state fragments from open loops', () => {
+  const state = materializeTaskState('runtime-noise-session', [
+    {
+      id: 'u1:message',
+      kind: 'message',
+      sessionId: 'runtime-noise-session',
+      createdAt: '2026-03-23T07:51:00.000Z',
+      payload: {
+        text: 'Remember that the current task is validating the hypergraph context engine on Ubuntu and the next step is to confirm memory flush works.',
+      },
+    },
+    {
+      id: 'u1:open-loop',
+      kind: 'open_loop',
+      sessionId: 'runtime-noise-session',
+      createdAt: '2026-03-23T07:51:00.000Z',
+      payload: {
+        text: 'Remember that the current task is validating the hypergraph context engine on Ubuntu and the next step is to confirm memory flush works.',
+      },
+    },
+    {
+      id: 'a1:open-loop',
+      kind: 'open_loop',
+      sessionId: 'runtime-noise-session',
+      createdAt: '2026-03-23T07:51:10.000Z',
+      payload: {
+        text: '{"type":"thinking","thinking":"debug","thinkingSignature":"abc"}',
+      },
+    },
+    {
+      id: 'a2:open-loop',
+      kind: 'open_loop',
+      sessionId: 'runtime-noise-session',
+      createdAt: '2026-03-23T07:51:20.000Z',
+      payload: {
+        text: '** Confirm memory flush works',
+      },
+    },
+  ]);
+
+  assert.deepEqual(state.openLoops, [
+    'Remember that the current task is validating the hypergraph context engine on Ubuntu and the next step is to confirm memory flush works.',
+    'Confirm memory flush works',
+  ]);
 });
 
 test('assembleContext degrades safely when no snapshot exists', () => {

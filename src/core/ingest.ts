@@ -24,6 +24,25 @@ const DECISION_PATTERNS = [/\bwe will\b/i, /\bI('?| wi)ll\b/i, /决定/g, /采�
 const TOOL_RESULT_DECISION_PATTERNS = [/^commit\s+[0-9a-f]{7,}\b/im, /^[0-9a-f]{7,}\s+\S+/m, /\bTo\s+.+github/im, /Everything up-to-date/im, /npm run demo(?::snapshots)?/i, /summary created for/i];
 const OPEN_LOOP_PATTERNS = [/\?$/, /todo/i, /follow up/i, /next step/i, /待处理/g, /后续/g];
 const RESOLUTION_PATTERNS = [/\b(done|fixed|resolved|completed|finished|closed|shipped)\b/i, /已完成/g, /完成了/g, /解决了/g, /关闭了/g];
+const IGNORED_CONTENT_TYPES = new Set([
+  'thinking',
+  'reasoning',
+  'toolcall',
+  'tool_call',
+  'functioncall',
+  'function_call',
+  'custom_tool_call',
+  'server_tool_call',
+  'computer_call',
+  'mcp_call',
+]);
+const TRANSIENT_RUNTIME_PATTERNS = [
+  /"type"\s*:\s*"thinking"/i,
+  /"type"\s*:\s*"toolcall"/i,
+  /"type"\s*:\s*"tool_call"/i,
+  /"thinkingSignature"\s*:/i,
+  /"arguments"\s*:\s*\{/i,
+];
 const ARTIFACT_PATTERNS = [
   /src\//i,
   /README(?:\.md)?/i,
@@ -480,7 +499,7 @@ function inferTags(entry: TranscriptEntryLike, text: string): string[] {
     tags.add('constraintish');
   }
 
-  if (matchesAny(OPEN_LOOP_PATTERNS, text) && !looksLikePriorityList(text)) {
+  if (matchesOpenLoopPattern(text) && !looksLikePriorityList(text)) {
     tags.add('open-loopish');
   }
 
@@ -537,16 +556,45 @@ function normalizeContentToText(content: unknown): string {
   }
 
   if (Array.isArray(content)) {
-    return content.map(normalizeContentToText).filter(Boolean).join('\n');
+    return content
+      .map(normalizeContentToText)
+      .filter((value): value is string => Boolean(value.trim()))
+      .join('\n');
   }
 
   if (content && typeof content === 'object') {
-    const text = asOptionalString((content as Record<string, unknown>).text);
+    const record = content as Record<string, unknown>;
+    const type = asOptionalString(record.type)?.toLowerCase();
+    if (type && IGNORED_CONTENT_TYPES.has(type)) {
+      return '';
+    }
+
+    const text = asOptionalString(record.text);
     if (text) {
       return text;
     }
 
-    return JSON.stringify(content);
+    const directCandidates = [
+      record.summary,
+      record.message,
+      record.value,
+      record.output_text,
+      record.input_text,
+      record.outputText,
+      record.inputText,
+      record.title,
+    ]
+      .map(asOptionalString)
+      .filter((value): value is string => Boolean(value?.trim()));
+    if (directCandidates.length > 0) {
+      return directCandidates.join('\n');
+    }
+
+    if ('content' in record) {
+      return normalizeContentToText(record.content);
+    }
+
+    return '';
   }
 
   return '';
@@ -557,7 +605,7 @@ function matchesAny(patterns: RegExp[], text: string): boolean {
 }
 
 function extractOpenLoopText(text: string): string | undefined {
-  if (!matchesAny(OPEN_LOOP_PATTERNS, text)) {
+  if (!matchesOpenLoopPattern(text)) {
     return undefined;
   }
 
@@ -567,9 +615,84 @@ function extractOpenLoopText(text: string): string | undefined {
   const extracted = lastCue
     ? text.slice((lastCue.index ?? 0) + lastCue[0].length)
     : trailingQuestionMatch?.[1] ?? text;
-  const normalized = extracted.trim();
+  const normalized = sanitizeOpenLoopText(extracted);
 
   return normalized || undefined;
+}
+
+function sanitizeOpenLoopText(value: string): string | undefined {
+  if (value.length > 320 || /```|##\s+/i.test(value)) {
+    return undefined;
+  }
+
+  const compact = stripRuntimeScaffolding(value)
+    .replace(/\r/g, '')
+    .replace(/^[\s>*`#-]+/, '')
+    .replace(/^\*+\s*/, '')
+    .replace(/^[:\-–]+\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!compact || compact.length < 3) {
+    return undefined;
+  }
+
+  if (compact.length > 220) {
+    return undefined;
+  }
+
+  if (looksLikeTransientRuntimeText(compact)) {
+    return undefined;
+  }
+
+  return compact;
+}
+
+function looksLikeTransientRuntimeText(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && TRANSIENT_RUNTIME_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return true;
+  }
+
+  return false;
+}
+
+function stripRuntimeScaffolding(value: string): string {
+  return value
+    .replace(/^\[[^[\]]+\]\s*/u, '')
+    .replace(/\s+##\s+(?:Context|Notes|Current Task|Current Plan|Blockers|Next Steps)\b[\s\S]*$/i, '')
+    .replace(/\s*<\/final>[\s\S]*$/i, '')
+    .replace(/\s+\b(?:Is that still accurate|Or has it moved on|What would you like me to do to verify that)\b[\s\S]*$/i, '')
+    .trim();
+}
+
+function matchesOpenLoopPattern(text: string): boolean {
+  if (looksLikeMemoryRecallMessage(text)) {
+    return false;
+  }
+
+  if (/\b(open loop|todo|follow up|blocked on|pending)\b/i.test(text)) {
+    return true;
+  }
+
+  if (/\bnext step\b\s*[:：-]/i.test(text)) {
+    return true;
+  }
+
+  return /寰呭鐞?g/.test(text) || /鍚庣画/g.test(text);
+}
+
+function looksLikeMemoryRecallMessage(text: string): boolean {
+  const normalized = stripRuntimeScaffolding(text).toLowerCase();
+  return /\bwhat is the current task and the next step\b/.test(normalized)
+    || /\basked you to remember\b/.test(normalized)
+    || /\bfrom today'?s memory\b/.test(normalized)
+    || (/\bcurrent task:\b/.test(normalized) && /\bnext step:\b/.test(normalized))
+    || /\bthe context was that\b/.test(normalized);
 }
 
 function looksLikePriorityList(text: string): boolean {

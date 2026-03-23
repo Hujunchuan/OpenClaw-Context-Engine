@@ -321,6 +321,165 @@ test('WorkspaceMemoryRepository flushes and reloads layered memory through works
   assert.ok(readResult.nodes.every((node) => node.kind === 'memory_chunk'));
 });
 
+test('WorkspaceMemoryRepository maintenance promotes qualifying entries across layers and rewrites files', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-maintain-'));
+  const store = new LayeredMemoryWorkspaceStore(tempDir);
+  const repository = new WorkspaceMemoryRepository(tempDir);
+  const now = '2026-03-23T09:00:00.000Z';
+
+  store.writeFlush({
+    nowState: {
+      currentTask: 'maintain layered memory',
+      currentPlan: [],
+      blockers: [],
+      nextSteps: [],
+      updatedAt: now,
+    },
+    entries: [
+      {
+        ...routeMemoryCandidate({
+          title: 'Current Task State',
+          summary: 'Implement layered memory maintenance',
+          category: 'current-task',
+          scope: 'task',
+          persistence: 'task',
+          recurrence: 3,
+          connectivity: 3,
+          activationEnergy: 'low',
+        }),
+        updatedAt: now,
+        firstSeenAt: '2026-03-20T09:00:00.000Z',
+        hitCount: 3,
+        sessionCount: 2,
+        lastSessionId: toySessionId,
+        sourceFile: '',
+      },
+      {
+        ...routeMemoryCandidate({
+          title: 'Reusable Pattern',
+          summary: 'Use a reusable workflow for flush and hydrate memory.',
+          category: 'pattern',
+          scope: 'workflow',
+          persistence: 'project',
+          recurrence: 4,
+          connectivity: 4,
+          activationEnergy: 'medium',
+        }),
+        updatedAt: now,
+        firstSeenAt: '2026-03-01T09:00:00.000Z',
+        hitCount: 4,
+        sessionCount: 3,
+        lastSessionId: toySessionId,
+        sourceFile: '',
+      },
+    ],
+    dailyAudit: ['seed maintenance entries'],
+  });
+
+  const maintenance = repository.maintain({
+    sessionId: toySessionId,
+    now,
+  });
+
+  const warmPath = join(tempDir, resolveMemoryRelativePath({
+    layer: 'warm',
+    category: 'current-task',
+    dedupeKey: routeMemoryCandidate({
+      title: 'Current Task State',
+      summary: 'Implement layered memory maintenance',
+      category: 'current-task',
+      scope: 'task',
+      persistence: 'task',
+      recurrence: 3,
+      connectivity: 3,
+      activationEnergy: 'low',
+    }).dedupeKey,
+  }));
+  const coldPath = join(tempDir, resolveMemoryRelativePath({
+    layer: 'cold',
+    category: 'pattern',
+    dedupeKey: routeMemoryCandidate({
+      title: 'Reusable Pattern',
+      summary: 'Use a reusable workflow for flush and hydrate memory.',
+      category: 'pattern',
+      scope: 'workflow',
+      persistence: 'project',
+      recurrence: 4,
+      connectivity: 4,
+      activationEnergy: 'medium',
+    }).dedupeKey,
+  }));
+
+  assert.ok(maintenance.writtenFiles.includes('MEMORY.md'));
+  assert.equal(existsSync(join(tempDir, 'memory', 'hot', 'current-task.md')), false);
+  assert.ok(existsSync(warmPath));
+  assert.ok(existsSync(coldPath));
+  assert.ok(maintenance.entries.some((entry) => entry.layer === 'warm' && entry.title === 'Current Task State'));
+  assert.ok(maintenance.entries.some((entry) => entry.layer === 'cold' && entry.title === 'Reusable Pattern'));
+});
+
+test('engine afterTurn triggers maintenance writeback when promoteOnMaintenance is enabled', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-afterturn-'));
+  const store = new LayeredMemoryWorkspaceStore(tempDir);
+  const now = '2026-03-23T10:00:00.000Z';
+
+  store.writeFlush({
+    nowState: {
+      currentTask: 'afterTurn maintenance',
+      currentPlan: [],
+      blockers: [],
+      nextSteps: [],
+      updatedAt: now,
+    },
+    entries: [{
+      ...routeMemoryCandidate({
+        title: 'Current Task State',
+        summary: 'Stabilize afterTurn maintenance',
+        category: 'current-task',
+        scope: 'task',
+        persistence: 'task',
+        recurrence: 3,
+        connectivity: 3,
+        activationEnergy: 'low',
+      }),
+      updatedAt: now,
+      firstSeenAt: '2026-03-20T10:00:00.000Z',
+      hitCount: 3,
+      sessionCount: 2,
+      lastSessionId: toySessionId,
+      sourceFile: '',
+    }],
+    dailyAudit: ['seed hot entry for afterTurn'],
+  });
+
+  const engine = new HypergraphContextEngine({
+    memoryWorkspaceRoot: tempDir,
+    enableLayeredRead: true,
+    enableLayeredWrite: false,
+    flushOnAfterTurn: false,
+    flushOnCompact: false,
+    promoteOnMaintenance: true,
+  });
+
+  await engine.afterTurn('maintenance-only-session');
+
+  assert.equal(existsSync(join(tempDir, 'memory', 'hot', 'current-task.md')), false);
+  assert.ok(existsSync(join(tempDir, resolveMemoryRelativePath({
+    layer: 'warm',
+    category: 'current-task',
+    dedupeKey: routeMemoryCandidate({
+      title: 'Current Task State',
+      summary: 'Stabilize afterTurn maintenance',
+      category: 'current-task',
+      scope: 'task',
+      persistence: 'task',
+      recurrence: 3,
+      connectivity: 3,
+      activationEnergy: 'low',
+    }).dedupeKey,
+  }))));
+});
+
 test('routeLayeredMemory emits hot entries from current task state and stable principles into colder tiers', () => {
   const state = materializeTaskState('route-session', toyTranscript.flatMap((entry) => []), []);
   const taskState = {

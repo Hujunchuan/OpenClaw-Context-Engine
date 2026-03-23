@@ -3,7 +3,6 @@
   "name": "Hypergraph Context Engine",
   "description": "Task-state-guided context engine prototype for OpenClaw.",
   "version": "0.1.0",
-  "kind": "context-engine",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

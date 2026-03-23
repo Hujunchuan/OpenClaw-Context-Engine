@@ -26,6 +26,9 @@ export interface OpenClawAdapterAssembleResult {
 
 export interface OpenClawAdapterCompactResult {
   summaryNodeId?: string;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
   notes?: string[];
 }
 
@@ -65,6 +68,13 @@ export class OpenClawHypergraphAdapter {
     for (const entry of params.entries) {
       await this.ingest({ sessionId: params.sessionId, entry });
     }
+  }
+
+  async syncTranscript(params: { sessionId: string; entries: TranscriptEntryLike[] }): Promise<{ ingestedCount: number }> {
+    return this.engine.syncTranscript(
+      params.sessionId,
+      params.entries.map((entry) => normalizeTranscriptEntry(entry)),
+    );
   }
 
   async assemble(params: OpenClawAdapterAssembleParams): Promise<OpenClawAdapterAssembleResult> {

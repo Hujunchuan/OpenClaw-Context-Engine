@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import {
   CONTEXT_ENGINE_CONFIG_SCHEMA,
   CONTEXT_ENGINE_PLUGIN_INFO,
   normalizeContextEngineConfig,
 } from '../../src/plugin/config.js';
+import { getOrCreateRuntimeAdapter } from '../../src/plugin/runtime-adapter.js';
 
 test('plugin manifest stays aligned with shared plugin metadata and config schema', () => {
   const manifest = JSON.parse(
@@ -43,4 +47,35 @@ test('normalizeContextEngineConfig applies defaults from the shared config modul
   assert.equal(config.enableLayeredRead, true);
   assert.equal(config.enableLayeredWrite, true);
   assert.ok(config.memoryWorkspaceRoot.endsWith('memory-root'));
+});
+
+test('runtime adapter cache key changes when behavior-affecting config changes', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'openclaw-context-engine-cache-'));
+  const dbPath = join(tempDir, 'context.sqlite');
+  const memoryWorkspaceRoot = join(tempDir, 'memory-root');
+
+  const baseline = getOrCreateRuntimeAdapter({
+    dbPath,
+    memoryWorkspaceRoot,
+    flushOnAfterTurn: true,
+    flushOnCompact: true,
+    promoteOnMaintenance: true,
+  });
+  const changed = getOrCreateRuntimeAdapter({
+    dbPath,
+    memoryWorkspaceRoot,
+    flushOnAfterTurn: false,
+    flushOnCompact: true,
+    promoteOnMaintenance: true,
+  });
+  const repeated = getOrCreateRuntimeAdapter({
+    dbPath,
+    memoryWorkspaceRoot,
+    flushOnAfterTurn: false,
+    flushOnCompact: true,
+    promoteOnMaintenance: true,
+  });
+
+  assert.notEqual(baseline, changed);
+  assert.equal(changed, repeated);
 });

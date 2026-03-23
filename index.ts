@@ -1,10 +1,42 @@
-import { CONTEXT_ENGINE_PLUGIN_INFO, getOrCreateRuntimeAdapter } from './src/plugin/index.js';
+import {
+  CONTEXT_ENGINE_PLUGIN_INFO,
+  getOrCreateRuntimeAdapter,
+  registerOpenClawHookBridge,
+} from './src/plugin/index.js';
 
-export default function register(api: {
+type LegacyContextEngineApi = {
   registerContextEngine: (id: string, factory: (runtimeConfig?: unknown) => unknown | Promise<unknown>) => void;
-}): void {
+  pluginConfig?: Record<string, unknown>;
+};
+
+type HookBridgeApi = {
+  on: (hookName: string, handler: (...args: unknown[]) => unknown, opts?: { priority?: number }) => void;
+  pluginConfig?: Record<string, unknown>;
+  logger?: {
+    info?: (message: string) => void;
+    warn?: (message: string) => void;
+    error?: (message: string) => void;
+    debug?: (message: string) => void;
+  };
+};
+
+export default function register(api: LegacyContextEngineApi | HookBridgeApi): void {
+  if (isLegacyContextEngineApi(api)) {
+    registerLegacyContextEngine(api);
+    return;
+  }
+
+  if (isHookBridgeApi(api)) {
+    registerOpenClawHookBridge(api);
+    return;
+  }
+
+  throw new Error('Unsupported plugin registration API for hypergraph-context-engine.');
+}
+
+function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
   api.registerContextEngine(CONTEXT_ENGINE_PLUGIN_INFO.id, (runtimeConfig?: unknown) => {
-    const adapter = getOrCreateRuntimeAdapter(runtimeConfig as Parameters<typeof getOrCreateRuntimeAdapter>[0]);
+    const adapter = getOrCreateRuntimeAdapter(mergeRuntimeConfig(api.pluginConfig, runtimeConfig));
 
     return {
       info: {
@@ -59,6 +91,7 @@ export default function register(api: {
         tokenBudget?: number;
       }) {
         const runtimeSessionId = getRuntimeSessionId(params);
+        await syncRuntimeMessages(adapter, runtimeSessionId, params.messages ?? []);
         const currentTurnText = extractLatestUserText(params.messages ?? []);
         const result = await adapter.assemble({
           sessionId: runtimeSessionId,
@@ -92,18 +125,12 @@ export default function register(api: {
           result: result.summaryNodeId
             ? {
                 summary: `Structured summary emitted: ${result.summaryNodeId}`,
-                firstKeptEntryId: undefined,
-                tokensBefore: params.currentTokenCount ?? 0,
-                tokensAfter: params.currentTokenCount,
+                firstKeptEntryId: result.firstKeptEntryId ?? params.sessionId,
+                tokensBefore: result.tokensBefore ?? params.currentTokenCount ?? 0,
+                tokensAfter: result.tokensAfter,
                 details: result,
               }
-            : {
-                summary: undefined,
-                firstKeptEntryId: undefined,
-                tokensBefore: params.currentTokenCount ?? 0,
-                tokensAfter: params.currentTokenCount,
-                details: result,
-              },
+            : undefined,
         };
       },
 
@@ -119,6 +146,7 @@ export default function register(api: {
         runtimeContext?: Record<string, unknown>;
       }) {
         const runtimeSessionId = getRuntimeSessionId(params);
+        await syncRuntimeMessages(adapter, runtimeSessionId, params.messages ?? []);
         await adapter.afterTurn({ sessionId: runtimeSessionId });
       },
     };
@@ -142,4 +170,49 @@ function extractLatestUserText(messages: Array<Record<string, unknown>>): string
 function estimateTokens(messages: Array<Record<string, unknown>>): number {
   const chars = JSON.stringify(messages).length;
   return Math.max(1, Math.ceil(chars / 4));
+}
+
+async function syncRuntimeMessages(
+  adapter: Awaited<ReturnType<typeof getOrCreateRuntimeAdapter>>,
+  sessionId: string,
+  messages: Array<Record<string, unknown>>,
+): Promise<void> {
+  if (messages.length === 0) {
+    return;
+  }
+
+  await adapter.syncTranscript({
+    sessionId,
+    entries: messages.map((message) => ({
+      ...message,
+      id: String((message as { id?: unknown })?.id ?? crypto.randomUUID()),
+      createdAt: String((message as { createdAt?: unknown })?.createdAt ?? new Date().toISOString()),
+    })),
+  });
+}
+
+function isLegacyContextEngineApi(value: LegacyContextEngineApi | HookBridgeApi): value is LegacyContextEngineApi {
+  return typeof (value as LegacyContextEngineApi)?.registerContextEngine === 'function';
+}
+
+function isHookBridgeApi(value: LegacyContextEngineApi | HookBridgeApi): value is HookBridgeApi {
+  return typeof (value as HookBridgeApi)?.on === 'function';
+}
+
+function mergeRuntimeConfig(
+  pluginConfig: Record<string, unknown> | undefined,
+  runtimeConfig: unknown,
+): Parameters<typeof getOrCreateRuntimeAdapter>[0] {
+  if (!runtimeConfig || typeof runtimeConfig !== 'object') {
+    return pluginConfig as Parameters<typeof getOrCreateRuntimeAdapter>[0];
+  }
+
+  if (!pluginConfig) {
+    return runtimeConfig as Parameters<typeof getOrCreateRuntimeAdapter>[0];
+  }
+
+  return {
+    ...(pluginConfig as Record<string, unknown>),
+    ...(runtimeConfig as Record<string, unknown>),
+  } as Parameters<typeof getOrCreateRuntimeAdapter>[0];
 }

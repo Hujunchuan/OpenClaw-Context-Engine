@@ -47,6 +47,9 @@ export interface AssembleOutput {
 
 export interface CompactOutput {
   summaryNodeId?: string;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
   notes?: string[];
 }
 
@@ -95,6 +98,32 @@ export class HypergraphContextEngine {
     this.persistSession(sessionId);
   }
 
+  async syncTranscript(sessionId: string, entries: TranscriptEntryLike[]): Promise<{ ingestedCount: number }> {
+    if (entries.length === 0) {
+      return { ingestedCount: 0 };
+    }
+
+    const snapshot = this.ensureSession(sessionId);
+    const existingIds = new Set(snapshot.transcriptEntries.map((entry) => entry.id));
+    let ingestedCount = 0;
+
+    for (const entry of entries) {
+      if (existingIds.has(entry.id)) {
+        continue;
+      }
+
+      ingestTranscriptEntry(this.state, sessionId, entry);
+      existingIds.add(entry.id);
+      ingestedCount += 1;
+    }
+
+    if (ingestedCount > 0) {
+      this.persistSession(sessionId);
+    }
+
+    return { ingestedCount };
+  }
+
   async assemble(input: AssembleInput): Promise<AssembleOutput> {
     const snapshot = this.buildAssembleSnapshot(input.sessionId);
     const result = assembleContext(snapshot, input);
@@ -139,9 +168,15 @@ export class HypergraphContextEngine {
     const computation = compactSession(snapshot);
     this.state.sessions.set(sessionId, computation.compactedSnapshot as PersistableSessionSnapshot);
     this.persistSession(sessionId);
+    const tokensBefore = estimateSnapshotTokens(snapshot);
+    const estimatedTokensAfter = estimateSnapshotTokens(computation.compactedSnapshot);
+    const tokensAfter = estimatedTokensAfter < tokensBefore ? estimatedTokensAfter : undefined;
 
     return {
       summaryNodeId: computation.summaryNode.id,
+      firstKeptEntryId: computation.compactedSnapshot.transcriptEntries[0]?.id,
+      tokensBefore,
+      tokensAfter,
       notes: computation.notes,
     };
   }
@@ -152,7 +187,7 @@ export class HypergraphContextEngine {
     }
 
     if (this.promoteOnMaintenance) {
-      this.hydrateMemory(sessionId);
+      this.memoryRepository?.maintain({ sessionId });
     }
 
     void taskState;
@@ -283,4 +318,9 @@ export class HypergraphContextEngine {
 
 function stripTransientMemoryNodes(nodes: BaseNode[]): BaseNode[] {
   return nodes.filter((node) => node.kind !== 'memory_chunk');
+}
+
+function estimateSnapshotTokens(snapshot: PersistableSessionSnapshot): number {
+  const chars = JSON.stringify(snapshot.transcriptEntries).length;
+  return Math.max(1, Math.ceil(chars / 4));
 }

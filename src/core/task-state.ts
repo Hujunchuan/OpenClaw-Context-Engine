@@ -15,17 +15,17 @@ function uniqueLimited(values: Array<string | undefined>, limit = MAX_ITEMS_PER_
   const seen = new Set<string>();
 
   for (const value of values) {
-    if (!value) {
+    const cleaned = sanitizeStateText(value);
+    if (!cleaned) {
       continue;
     }
 
-    const normalized = value.trim();
-    if (!normalized || seen.has(normalized)) {
+    if (seen.has(cleaned)) {
       continue;
     }
 
-    seen.add(normalized);
-    out.push(normalized);
+    seen.add(cleaned);
+    out.push(cleaned);
 
     if (out.length >= limit) {
       break;
@@ -70,7 +70,7 @@ export function materializeTaskState(sessionId: string, nodes: BaseNode[], edges
   const invalidatedOpenLoopIds = new Set(edges.filter((edge) => edge.kind === 'invalidates').map((edge) => edge.to));
   const supersededDecisionIds = new Set(edges.filter((edge) => edge.kind === 'supersedes').map((edge) => edge.to));
 
-  const intent = selectBestIntent(intentNodes) ?? summarySeed.intent ?? null;
+  const intent = sanitizeStateText(selectBestIntent(intentNodes) ?? summarySeed.intent ?? undefined) ?? null;
 
   const constraints = uniqueLimited([
     ...constraintNodes.map((node) => readPrimaryText(node.payload) ?? readSecondaryText(node.payload)),
@@ -120,7 +120,7 @@ export function materializeTaskState(sessionId: string, nodes: BaseNode[], edges
       .filter((node) => !resolvedOpenLoopIds.has(node.id))
       .map((node) => readPrimaryText(node.payload) ?? readSecondaryText(node.payload)),
     ...(summarySeed.openLoops ?? []),
-  ]);
+  ]).filter((value) => !looksLikeRecallOnlyOpenLoop(value));
 
   const priorityStatus = mergePriorityStatus([
     ...derivePriorityStatus(sortedNodes, {
@@ -776,4 +776,52 @@ function asOptionalNumber(value: unknown): number | undefined {
 
 function asOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function sanitizeStateText(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const cleaned = value
+    .replace(/^\[[^[\]]+\]\s*/u, '')
+    .replace(/\s+##\s+(?:Context|Notes|Current Task|Current Plan|Blockers|Next Steps)\b[\s\S]*$/i, '')
+    .replace(/\s*<\/final>[\s\S]*$/i, '')
+    .replace(/\s+\b(?:Is that still accurate|Or has it moved on|What would you like me to do to verify that)\b[\s\S]*$/i, '')
+    .replace(/\r/g, '')
+    .replace(/^[\s>*`#-]+/, '')
+    .replace(/^\*+\s*/, '')
+    .replace(/^[:\-–]+\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned || cleaned.length < 2) {
+    return undefined;
+  }
+
+  if (looksLikeTransientRuntimeState(cleaned)) {
+    return undefined;
+  }
+
+  return cleaned;
+}
+
+function looksLikeTransientRuntimeState(value: string): boolean {
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) {
+    return false;
+  }
+
+  return /"type"\s*:\s*"(thinking|toolcall|tool_call)"/i.test(trimmed)
+    || /"thinkingSignature"\s*:/i.test(trimmed)
+    || /"arguments"\s*:\s*\{/i.test(trimmed);
+}
+
+function looksLikeRecallOnlyOpenLoop(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return /\bwhat is the current task and the next step\b/.test(normalized)
+    || /\basked you to remember\b/.test(normalized)
+    || /\bfrom today'?s memory\b/.test(normalized)
+    || (/\bcurrent task:\b/.test(normalized) && /\bnext step:\b/.test(normalized))
+    || /\bthe context was that\b/.test(normalized);
 }

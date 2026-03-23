@@ -11,9 +11,7 @@ declare global {
 
 export function getOrCreateRuntimeAdapter(input?: RuntimeConfigLike): OpenClawHypergraphAdapter {
   const config = normalizeRuntimeAdapterConfig(input);
-  const cacheKey = config.disablePersistence
-    ? `memory:${config.memoryWorkspaceRoot}`
-    : `sqlite:${config.dbPath}|memory:${config.memoryWorkspaceRoot}`;
+  const cacheKey = buildAdapterCacheKey(config);
   const cached = getAdapterCache().get(cacheKey);
   if (cached) {
     return cached;
@@ -48,6 +46,19 @@ export function normalizeRuntimeAdapterConfig(input?: RuntimeConfigLike): Runtim
 
 export type RuntimeAdapterConfig = ResolvedContextEngineConfig;
 type RuntimeConfigLike = ContextEngineConfigInput;
+
+function buildAdapterCacheKey(config: RuntimeAdapterConfig): string {
+  return JSON.stringify({
+    disablePersistence: config.disablePersistence,
+    dbPath: config.dbPath ?? null,
+    memoryWorkspaceRoot: config.memoryWorkspaceRoot,
+    enableLayeredRead: config.enableLayeredRead,
+    enableLayeredWrite: config.enableLayeredWrite,
+    flushOnAfterTurn: config.flushOnAfterTurn,
+    flushOnCompact: config.flushOnCompact,
+    promoteOnMaintenance: config.promoteOnMaintenance,
+  });
+}
 
 function getOrCreateStore(filename: string): SQLiteStore {
   const cache = getStoreCache();
