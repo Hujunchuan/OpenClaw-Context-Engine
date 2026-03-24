@@ -56,6 +56,17 @@ export interface RouteLayeredMemoryParams extends MemoryNamespaceContext {
   now?: string;
 }
 
+export const HYPERGRAPH_MEMORY_ROOT = '.hypergraph-memory';
+
+type NamespacePathContext = {
+  sessionId?: string;
+  agentId?: string;
+  workspaceId?: string;
+  lastSessionId?: string;
+  lastAgentId?: string;
+  lastWorkspaceId?: string;
+};
+
 const REUSABLE_PATTERN_CUES = [
   /\b(pattern|workflow|checklist|playbook|reusable|repeat(?:ed|ing)?|template|debug|troubleshoot|fallback|degrade gracefully)\b/i,
   /模式|流程|经验|套路|复用|排障|降级|回退/u,
@@ -76,7 +87,7 @@ export function routeLayeredMemory(params: RouteLayeredMemoryParams): LayeredMem
   const entries = candidates.map((candidate) => {
     const routed = routeMemoryCandidate(candidate);
     const dedupeKey = routed.layer === 'hot'
-      ? qualifyHotDedupeKey(routed.category ?? 'current-task', params)
+      ? qualifyNamespacedDedupeKey(`hot-${routed.category ?? 'current-task'}`, params)
       : routed.dedupeKey;
     const existing = existingByKey.get(dedupeKey);
     const recurrence = Math.max(routed.recurrence, (existing?.recurrence ?? 0) + 1);
@@ -188,38 +199,55 @@ export function resolveMemoryRelativePath(
     'layer' | 'category' | 'dedupeKey' | 'lastSessionId' | 'lastAgentId' | 'lastWorkspaceId'
   >,
 ): string {
-  if (entry.layer === 'hot') {
-    if (entry.lastSessionId || entry.lastAgentId || entry.lastWorkspaceId) {
-      return `memory/hot/${slugify(entry.dedupeKey)}.md`;
-    }
+  const namespaceDir = resolveNamespaceDirectory(entry);
 
-    if (entry.category === 'current-project') {
-      return 'memory/hot/current-project.md';
-    }
-
-    return 'memory/hot/current-task.md';
-  }
-
-  if (entry.layer === 'warm') {
-    const slug = slugify(`${entry.category ?? 'pattern'}-${entry.dedupeKey}`);
-    return `memory/warm/${slug}.md`;
-  }
-
-  if (entry.layer === 'cold') {
-    const category = entry.category ?? 'project-background';
-    const slug = slugify(`${category}-${entry.dedupeKey}`);
-    return `memory/cold/${slug}.md`;
+  if (entry.layer === 'daily_log') {
+    return resolveDailyLogRelativePath(new Date().toISOString().slice(0, 10));
   }
 
   if (entry.layer === 'archive') {
-    return `memory/archive/${slugify(entry.dedupeKey)}.md`;
+    const namespace = resolveNamespaceSegments(entry);
+    const archiveDir = `${HYPERGRAPH_MEMORY_ROOT}/archive/${namespace.kind}${namespace.slug ? `/${namespace.slug}` : ''}`;
+    return `${archiveDir}/archive--${slugify(entry.category ?? 'memory')}--${slugify(entry.dedupeKey)}.md`;
   }
 
-  if (entry.layer === 'daily_log') {
-    return `memory/${new Date().toISOString().slice(0, 10)}.md`;
+  if (entry.layer === 'memory_core') {
+    return resolveMemoryCoreRelativePath();
   }
 
-  return 'MEMORY.md';
+  return `${namespaceDir}/${entry.layer}--${slugify(entry.category ?? 'memory')}--${slugify(entry.dedupeKey)}.md`;
+}
+
+export function resolveNowRelativePath(namespace: NamespacePathContext): string {
+  const resolved = resolveNamespaceSegments(namespace);
+  const filename = resolved.kind === 'session'
+    ? 'SESSION_NOW.md'
+    : resolved.kind === 'agent'
+      ? 'AGENT_NOW.md'
+      : resolved.kind === 'workspace'
+        ? 'WORKSPACE_NOW.md'
+        : 'GLOBAL_NOW.md';
+
+  return `${HYPERGRAPH_MEMORY_ROOT}/${resolved.kind}${resolved.slug ? `/${resolved.slug}` : ''}/${filename}`;
+}
+
+export function resolveMemoryCoreRelativePath(): string {
+  return `${HYPERGRAPH_MEMORY_ROOT}/global/GLOBAL_MEMORY.md`;
+}
+
+export function resolveDailyLogRelativePath(date: string): string {
+  return `${HYPERGRAPH_MEMORY_ROOT}/archive/daily/${date}.md`;
+}
+
+export function qualifyNamespacedDedupeKey(base: string, namespace: NamespacePathContext): string {
+  const segments = [
+    slugify(base),
+    readNamespaceWorkspaceId(namespace) ? `workspace-${slugify(readNamespaceWorkspaceId(namespace)!)}` : undefined,
+    readNamespaceAgentId(namespace) ? `agent-${slugify(readNamespaceAgentId(namespace)!)}` : undefined,
+    readNamespaceSessionId(namespace) ? `session-${slugify(readNamespaceSessionId(namespace)!)}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+
+  return segments.join('--');
 }
 
 function collectCandidates(
@@ -442,15 +470,40 @@ function createDedupeKey(category: string, title: string, summary: string): stri
   return slugify(`${category}-${semanticKey}`.slice(0, 140));
 }
 
-function qualifyHotDedupeKey(category: string, namespace: MemoryNamespaceContext): string {
-  const segments = [
-    `hot-${slugify(category)}`,
-    namespace.workspaceId ? `workspace-${slugify(namespace.workspaceId)}` : undefined,
-    namespace.agentId ? `agent-${slugify(namespace.agentId)}` : undefined,
-    namespace.sessionId ? `session-${slugify(namespace.sessionId)}` : undefined,
-  ].filter((value): value is string => Boolean(value));
+function resolveNamespaceDirectory(namespace: NamespacePathContext): string {
+  const resolved = resolveNamespaceSegments(namespace);
+  return `${HYPERGRAPH_MEMORY_ROOT}/${resolved.kind}${resolved.slug ? `/${resolved.slug}` : ''}`;
+}
 
-  return segments.join('--');
+function resolveNamespaceSegments(namespace: NamespacePathContext): { kind: 'session' | 'agent' | 'workspace' | 'global'; slug?: string } {
+  const sessionId = readNamespaceSessionId(namespace);
+  if (sessionId) {
+    return { kind: 'session', slug: slugify(sessionId) };
+  }
+
+  const agentId = readNamespaceAgentId(namespace);
+  if (agentId) {
+    return { kind: 'agent', slug: slugify(agentId) };
+  }
+
+  const workspaceId = readNamespaceWorkspaceId(namespace);
+  if (workspaceId) {
+    return { kind: 'workspace', slug: slugify(workspaceId) };
+  }
+
+  return { kind: 'global' };
+}
+
+function readNamespaceSessionId(namespace: NamespacePathContext): string | undefined {
+  return namespace.sessionId ?? namespace.lastSessionId;
+}
+
+function readNamespaceAgentId(namespace: NamespacePathContext): string | undefined {
+  return namespace.agentId ?? namespace.lastAgentId;
+}
+
+function readNamespaceWorkspaceId(namespace: NamespacePathContext): string | undefined {
+  return namespace.workspaceId ?? namespace.lastWorkspaceId;
 }
 
 function slugify(value: string): string {

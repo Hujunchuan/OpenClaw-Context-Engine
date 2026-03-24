@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 
 import register from '../index.js';
 import { toyTranscript } from '../fixtures/toy-transcript.js';
+import { classifyQueryGateMode } from './core/dialogue-cues.js';
 import { retrieveRelevantNodes } from './core/retriever.js';
 import { materializeTaskState } from './core/task-state.js';
-import { routeMemoryCandidate, resolveMemoryRelativePath } from './memory/router.js';
+import { routeMemoryCandidate, resolveMemoryRelativePath, resolveNowRelativePath } from './memory/router.js';
 import { LayeredMemoryWorkspaceStore } from './memory/workspace-store.js';
 import { detectSlotSafeRuntimeProfile } from './plugin/runtime-message-utils.js';
 import { WorkspaceMemoryRepository } from './memory/repository.js';
@@ -143,7 +144,11 @@ async function main() {
       hooksRegistered: hooks.size,
       prependedContext: /\[Hypergraph Context Bridge\]/.test(hookResult?.prependContext ?? ''),
       hasIntent: /Intent:/.test(hookResult?.prependContext ?? ''),
-      nowExists: existsSync(join(tempDir, 'NOW.md')),
+      nowExists: existsSync(join(tempDir, resolveNowRelativePath({
+        sessionId: 'hook-bridge-chat',
+        agentId: 'hook-agent',
+        workspaceId: '/workspace/hook-bridge',
+      }))),
       identityLogged: /"sessionId":"hook-bridge-chat"/.test(hookIdentityLog),
       workspaceLogged: /"workspaceId":"\/workspace\/hook-bridge"/.test(hookIdentityLog),
     });
@@ -295,7 +300,9 @@ async function main() {
       ],
       prePromptMessageCount: 0,
     });
-    const nowText = readFileSync(join(tempDir, 'NOW.md'), 'utf8');
+    const nowText = readFileSync(join(tempDir, resolveNowRelativePath({
+      sessionId: 'explicit-session-id',
+    })), 'utf8');
 
     results.push({
       scenario: 'explicit-session-id-priority',
@@ -379,7 +386,10 @@ async function main() {
       ],
       prePromptMessageCount: 0,
     });
-    const nowText = readFileSync(join(tempDir, 'NOW.md'), 'utf8');
+    const nowText = readFileSync(join(tempDir, resolveNowRelativePath({
+      sessionId: 'slot-alias-alpha',
+      workspaceId: '/workspace/alias-alpha',
+    })), 'utf8');
     const aliasDebugLog = readFileSync(join(tempDir, 'runtime-identity-debug.log'), 'utf8');
 
     results.push({
@@ -469,6 +479,66 @@ async function main() {
       sessionHotOnlyLayers: sessionHotOnly.entries.map((entry) => entry.layer),
       sessionHotOnlySessionIds: sessionHotOnly.entries.map((entry) => entry.lastSessionId),
       transcriptOnlyCount: transcriptOnly.entries.length,
+    });
+  }
+
+  {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaw-runtime-query-gate-seed-'));
+    const store = new LayeredMemoryWorkspaceStore(tempDir);
+    const now = '2026-03-24T12:00:00.000Z';
+
+    store.writeFlush({
+      nowState: {
+        currentTask: 'Legacy memory task',
+        currentPlan: ['Do not leak into fresh explicit-task seed turns'],
+        blockers: [],
+        nextSteps: ['Remain hidden from a new explicit task declaration'],
+        updatedAt: now,
+        lastSessionId: 'other-session',
+        lastAgentId: 'agent-other',
+        lastWorkspaceId: '/workspace/other',
+      },
+      entries: [
+        {
+          ...routeMemoryCandidate({
+            title: 'Current Task State',
+            summary: 'Legacy global task that should not override a fresh explicit task declaration.',
+            category: 'current-task',
+            scope: 'task',
+            persistence: 'task',
+            recurrence: 3,
+            connectivity: 3,
+            activationEnergy: 'low',
+          }),
+          layer: 'cold',
+          updatedAt: now,
+          firstSeenAt: '2026-03-01T12:00:00.000Z',
+          hitCount: 5,
+          sessionCount: 3,
+          lastSessionId: 'other-session',
+          lastAgentId: 'agent-other',
+          lastWorkspaceId: '/workspace/other',
+          sourceFile: '',
+        },
+      ],
+      dailyAudit: ['seed explicit task gate test'],
+    });
+
+    const repository = new WorkspaceMemoryRepository(tempDir);
+    const queryGateMode = classifyQueryGateMode(
+      'Current task: alpha session isolation test. Next step: verify alpha session stays isolated.',
+    );
+    const readResult = repository.read({
+      sessionId: 'session-alpha',
+      agentId: 'agent-alpha',
+      workspaceId: '/workspace/shared',
+      queryGateMode,
+    });
+
+    results.push({
+      scenario: 'query-gate-explicit-task-seed',
+      queryGateMode,
+      readEntriesCount: readResult.entries.length,
     });
   }
 
@@ -572,6 +642,43 @@ async function main() {
       hasCanonicalTaskHint: /Canonical current session task:/i.test(assembled.systemPromptAddition ?? ''),
       hasCanonicalNextStepHint: /Canonical current session next step:/i.test(assembled.systemPromptAddition ?? ''),
       hasAssistantCommitmentHint: /Latest assistant commitment:/i.test(assembled.systemPromptAddition ?? ''),
+      hasMemoryToolOverride: /do not run memory_search or memory_get against global or cross-session memory/i.test(assembled.systemPromptAddition ?? ''),
+    });
+  }
+
+  {
+    const engine = await createEngine({
+      disablePersistence: true,
+      enableLayeredRead: true,
+      enableLayeredWrite: false,
+      promoteOnMaintenance: false,
+    });
+    const seedMessages = [
+      {
+        id: 'u-seed-1',
+        role: 'user',
+        content: 'Current task: alpha session isolation test. Next step: verify alpha session stays isolated.',
+        createdAt: '2026-03-24T13:00:00.000Z',
+      },
+    ];
+    const assembled = await engine.assemble({
+      sessionId: 'seed-declaration-turn',
+      sessionKey: 'seed-declaration-chat',
+      messages: seedMessages,
+      tokenBudget: 320,
+    });
+
+    results.push({
+      scenario: 'seed-task-declaration-hints',
+      hasExplicitTaskHint: /Explicit current session task declaration:/i.test(assembled.systemPromptAddition ?? ''),
+      hasExplicitNextStepHint: /Explicit current session next step declaration:/i.test(assembled.systemPromptAddition ?? ''),
+      hasCanonicalSeedInstruction: /Treat this turn as the canonical task definition for the current session/i.test(assembled.systemPromptAddition ?? ''),
+      hasTranscriptOnlyMemoryOverride: /do not run memory_search or memory_get/i.test(assembled.systemPromptAddition ?? ''),
+      blocksMemoryFiles: /Do not consult MEMORY\.md, memory\/\*\.md, or unrelated long-term memory/i.test(assembled.systemPromptAddition ?? ''),
+      marksSeedAsStateUpdate: /state update, not a request to execute, verify, inspect sessions, or investigate memory/i.test(assembled.systemPromptAddition ?? ''),
+      blocksToolExecution: /do not call tools, do not inspect other sessions, do not update MEMORY\.md/i.test(assembled.systemPromptAddition ?? ''),
+      blocksNextStepExecution: /Do not begin the declared next step now/i.test(assembled.systemPromptAddition ?? ''),
+      hasPreferredReplyShape: /Preferred reply for this turn: one short acknowledgement/i.test(assembled.systemPromptAddition ?? ''),
     });
   }
 
@@ -632,7 +739,9 @@ async function main() {
       prePromptMessageCount: 0,
     });
 
-    const nowPath = join(tempDir, 'NOW.md');
+    const nowPath = join(tempDir, resolveNowRelativePath({
+      sessionId: 'current-task-now-turn',
+    }));
     const nowText = existsSync(nowPath) ? readFileSync(nowPath, 'utf8') : '';
 
     results.push({
@@ -664,13 +773,12 @@ async function main() {
       messages: toRuntimeMessages(),
       prePromptMessageCount: 0,
     });
+    const flushedEntries = new LayeredMemoryWorkspaceStore(tempDir).readEntries();
 
     results.push({
       scenario: 'afterturn-flush-enabled',
-      nowExists: existsSync(join(tempDir, 'NOW.md')),
-      hotFiles: existsSync(join(tempDir, 'memory', 'hot'))
-        ? readdirSync(join(tempDir, 'memory', 'hot')).length
-        : 0,
+      nowExists: flushedEntries.some((entry) => entry.relativePath.endsWith('_NOW.md') || entry.relativePath.endsWith('SESSION_NOW.md') || entry.relativePath.endsWith('NOW.md')),
+      hotFiles: flushedEntries.filter((entry) => entry.layer === 'hot').length,
     });
   }
 
@@ -691,10 +799,11 @@ async function main() {
       messages: toRuntimeMessages(),
       prePromptMessageCount: 0,
     });
+    const skippedEntries = new LayeredMemoryWorkspaceStore(tempDir).readEntries();
 
     results.push({
       scenario: 'afterturn-flush-disabled',
-      nowExists: existsSync(join(tempDir, 'NOW.md')),
+      nowExists: skippedEntries.some((entry) => entry.relativePath.endsWith('_NOW.md') || entry.relativePath.endsWith('SESSION_NOW.md') || entry.relativePath.endsWith('NOW.md')),
     });
   }
 
@@ -788,12 +897,76 @@ async function main() {
 
     results.push({
       scenario: 'maintenance-promotion',
-      hotExists: existsSync(join(tempDir, 'memory', 'hot', 'current-task.md')),
+      hotExists: existsSync(join(tempDir, resolveMemoryRelativePath({
+        layer: 'hot',
+        category: 'current-task',
+        dedupeKey: candidate.dedupeKey,
+        lastSessionId: 'persist-chat',
+      }))),
       warmExists: existsSync(join(tempDir, resolveMemoryRelativePath({
         layer: 'warm',
         category: 'current-task',
         dedupeKey: candidate.dedupeKey,
+        lastSessionId: 'persist-chat',
       }))),
+    });
+  }
+
+  {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaw-runtime-maintain-now-'));
+    const store = new LayeredMemoryWorkspaceStore(tempDir);
+    const repository = new WorkspaceMemoryRepository(tempDir);
+    const now = '2026-03-24T10:30:00.000Z';
+
+    store.writeFlush({
+      nowState: {
+        currentTask: 'Preserve namespace now documents during maintenance',
+        currentPlan: ['Keep SESSION_NOW.md intact'],
+        blockers: [],
+        nextSteps: ['Verify maintenance no longer deletes NOW or daily logs'],
+        updatedAt: now,
+        lastSessionId: 'session-preserve-now',
+        lastAgentId: 'agent-preserve-now',
+        lastWorkspaceId: '/workspace/preserve-now',
+      },
+      entries: [{
+        ...routeMemoryCandidate({
+          title: 'Current Task State',
+          summary: 'Preserve namespace now documents during maintenance',
+          category: 'current-task',
+          scope: 'task',
+          persistence: 'task',
+          recurrence: 3,
+          connectivity: 3,
+          activationEnergy: 'low',
+        }),
+        updatedAt: now,
+        firstSeenAt: '2026-03-20T10:30:00.000Z',
+        hitCount: 3,
+        sessionCount: 2,
+        lastSessionId: 'session-preserve-now',
+        lastAgentId: 'agent-preserve-now',
+        lastWorkspaceId: '/workspace/preserve-now',
+        sourceFile: '',
+      }],
+      dailyAudit: ['seed maintenance preservation test'],
+    });
+
+    repository.maintain({
+      sessionId: 'session-preserve-now',
+      agentId: 'agent-preserve-now',
+      workspaceId: '/workspace/preserve-now',
+      now,
+    });
+
+    results.push({
+      scenario: 'maintenance-preserves-now-and-daily',
+      nowExists: existsSync(join(tempDir, resolveNowRelativePath({
+        sessionId: 'session-preserve-now',
+        agentId: 'agent-preserve-now',
+        workspaceId: '/workspace/preserve-now',
+      }))),
+      dailyExists: existsSync(join(tempDir, '.hypergraph-memory', 'archive', 'daily', '2026-03-24.md')),
     });
   }
 

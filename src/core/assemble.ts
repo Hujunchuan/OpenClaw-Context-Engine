@@ -2,10 +2,12 @@ import type { AssembleBucket, BaseNode, MemoryChunkPayload, RetrievalCandidate, 
 import type { AssembleInput, AssembleOutput } from './engine.js';
 import type { SessionSnapshot } from './ingest.js';
 import {
+  classifyQueryGateMode,
   extractExplicitNextStep,
   extractExplicitTaskDefinition,
   isExplicitTaskDefinition,
   looksLikeConversationRecall as looksLikeConversationRecallCue,
+  looksLikeTaskSeedDeclaration,
   looksLikeTaskContinuationQuery,
 } from './dialogue-cues.js';
 import { retrieveRelevantNodes } from './retriever.js';
@@ -287,12 +289,15 @@ function buildSystemPrompt(
   selectedNodeIds: Set<string>,
   currentTurnText?: string,
 ): string {
+  const queryGateMode = classifyQueryGateMode(currentTurnText);
   const bucketSummary = buckets
     .filter((bucket) => bucket.nodeIds.length > 0)
     .map((bucket) => `${bucket.name}:${bucket.nodeIds.length}`)
     .join(', ');
   const dialogueRecallHints = buildDialogueRecallHints(nodes, selectedNodeIds, currentTurnText);
   const continuationHints = buildContinuationHints(nodes, selectedNodeIds, currentTurnText);
+  const seedTaskHints = buildSeedTaskHints(nodes, selectedNodeIds, currentTurnText);
+  const memoryToolOverrideHints = buildMemoryToolOverrideHints(queryGateMode, currentTurnText);
 
   return [
     'HypergraphContextEngine assembled task-state-guided context.',
@@ -308,6 +313,8 @@ function buildSystemPrompt(
     bucketSummary ? `Buckets: ${bucketSummary}` : undefined,
     ...dialogueRecallHints,
     ...continuationHints,
+    ...seedTaskHints,
+    ...memoryToolOverrideHints,
   ]
     .filter(Boolean)
     .join(' ');
@@ -401,6 +408,73 @@ function buildContinuationHints(
   }
 
   return hints;
+}
+
+function buildSeedTaskHints(
+  nodes: BaseNode[],
+  selectedNodeIds: Set<string>,
+  currentTurnText?: string,
+): string[] {
+  if (!looksLikeTaskSeedDeclaration(currentTurnText)) {
+    return [];
+  }
+
+  const selectedDialogueNodes = nodes
+    .filter((node) => selectedNodeIds.has(node.id) && node.kind === 'message')
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const userDialogue = selectedDialogueNodes.filter((node) => (node.payload as { role?: unknown }).role === 'user');
+  const latestUserSeed = [...userDialogue]
+    .reverse()
+    .find((node) => {
+      const text = readMessageText(node);
+      return Boolean(text) && looksLikeTaskSeedDeclaration(text);
+    });
+
+  const hints: string[] = [];
+  const seedText = latestUserSeed ? readMessageText(latestUserSeed) : undefined;
+  const explicitTask = extractExplicitTaskDefinition(seedText ?? currentTurnText);
+  const explicitNextStep = extractExplicitNextStep(seedText ?? currentTurnText);
+
+  if (explicitTask) {
+    hints.push(`Explicit current session task declaration: ${explicitTask}`);
+  }
+
+  if (explicitNextStep) {
+    hints.push(`Explicit current session next step declaration: ${explicitNextStep}`);
+  }
+
+  if (explicitTask || explicitNextStep) {
+    hints.push('Treat this turn as the canonical task definition for the current session. Do not reinterpret it using unrelated long-term memory, other sessions, or prior global recall unless the user explicitly asks for that.');
+    hints.push('This explicit task or next-step declaration is a state update, not a request to execute, verify, inspect sessions, or investigate memory. Acknowledge and store it faithfully unless the user explicitly asks you to act on it now.');
+    hints.push('For this turn, do not call tools, do not inspect other sessions, do not update MEMORY.md, and do not run memory_search or memory_get. Reply with a brief confirmation that the current task and next step were stored for this session.');
+    hints.push('Do not begin the declared next step now, even if it contains verbs like verify, check, run, inspect, test, or compare. Interpret those verbs only as labels inside the stored next-step field.');
+    hints.push('Preferred reply for this turn: one short acknowledgement such as "Stored the current task and next step for this session."');
+  }
+
+  return hints;
+}
+
+function buildMemoryToolOverrideHints(
+  queryGateMode: ReturnType<typeof classifyQueryGateMode>,
+  currentTurnText?: string,
+): string[] {
+  if (queryGateMode === 'transcript_only') {
+    return [
+      'Memory tool override: For this turn, do not run memory_search or memory_get. Do not consult MEMORY.md, memory/*.md, or unrelated long-term memory.',
+      looksLikeTaskSeedDeclaration(currentTurnText)
+        ? 'Use only the current session transcript and the explicit task or next-step declaration in this turn. Treat it as canonical, store it faithfully, and do not reinterpret it using older memory or turn it into an execution request.'
+        : 'Use only the current session transcript and the selected runtime messages for this turn.',
+    ];
+  }
+
+  if (queryGateMode === 'session_hot_only') {
+    return [
+      'Memory tool override: For this turn, do not run memory_search or memory_get against global or cross-session memory. Do not consult unrelated MEMORY.md history.',
+      'Answer using only the current session transcript, current-session task-state hints, and any already-injected same-session hot memory.',
+    ];
+  }
+
+  return [];
 }
 
 function classifyBucket(kind: BaseNode['kind']): AssembleBucket['name'] {

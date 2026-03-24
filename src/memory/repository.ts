@@ -1,6 +1,7 @@
 import type { BaseNode, FlushReason, MemoryNamespaceContext, TaskState } from '../../schemas/types.js';
 import { indexLayeredMemoryEntries } from './indexer.js';
 import { applyLifecyclePolicy } from './lifecycle.js';
+import { HYPERGRAPH_MEMORY_ROOT } from './router.js';
 import { routeLayeredMemory } from './router.js';
 import { LayeredMemoryWorkspaceStore, type StoredMemoryEntry } from './workspace-store.js';
 
@@ -110,7 +111,8 @@ export class WorkspaceMemoryRepository implements MemoryRepository {
 }
 
 function isManagedLayerEntry(entry: StoredMemoryEntry): boolean {
-  return entry.relativePath.startsWith('memory/hot/')
+  return entry.relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/`)
+    || entry.relativePath.startsWith('memory/hot/')
     || entry.relativePath.startsWith('memory/warm/')
     || entry.relativePath.startsWith('memory/cold/')
     || entry.relativePath.startsWith('memory/archive/');

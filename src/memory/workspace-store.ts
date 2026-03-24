@@ -13,7 +13,14 @@ import { dirname, join, relative, resolve } from 'node:path';
 import type { MemoryChunkPayload, MemoryLayer } from '../../schemas/types.js';
 import type { LayeredMemoryFlushPlan, NowDocumentState, RoutedLayeredMemoryEntry } from './router.js';
 import { mergeMemoryEntryState } from './lifecycle.js';
-import { resolveMemoryRelativePath } from './router.js';
+import {
+  HYPERGRAPH_MEMORY_ROOT,
+  qualifyNamespacedDedupeKey,
+  resolveDailyLogRelativePath,
+  resolveMemoryCoreRelativePath,
+  resolveMemoryRelativePath,
+  resolveNowRelativePath,
+} from './router.js';
 
 export interface StoredMemoryEntry extends MemoryChunkPayload {
   relativePath: string;
@@ -58,9 +65,11 @@ export class LayeredMemoryWorkspaceStore {
     mkdirSync(this.rootDir, { recursive: true });
     const writtenFiles: string[] = [];
 
-    const nowPath = resolve(this.rootDir, 'NOW.md');
+    const nowRelativePath = resolveNowRelativePath(plan.nowState);
+    const nowPath = resolve(this.rootDir, nowRelativePath);
+    mkdirSync(dirname(nowPath), { recursive: true });
     writeFileSync(nowPath, renderNowDocument(plan.nowState), 'utf8');
-    writtenFiles.push(relative(this.rootDir, nowPath).replace(/\\/g, '/'));
+    writtenFiles.push(nowRelativePath);
 
     const existingByPath = new Map(this.readEntries().map((entry) => [entry.relativePath, entry]));
     const existingByKey = new Map(this.readEntries().map((entry) => [entry.dedupeKey, entry]));
@@ -79,6 +88,9 @@ export class LayeredMemoryWorkspaceStore {
         layer: merged.layer,
         category: merged.category,
         dedupeKey: merged.dedupeKey,
+        lastSessionId: merged.lastSessionId,
+        lastAgentId: merged.lastAgentId,
+        lastWorkspaceId: merged.lastWorkspaceId,
       });
       const staleEntry = existingByKey.get(merged.dedupeKey);
       if (staleEntry && staleEntry.relativePath !== relativePath) {
@@ -90,7 +102,8 @@ export class LayeredMemoryWorkspaceStore {
       writtenFiles.push(relativePath);
     }
 
-    const dailyPath = resolve(this.rootDir, `memory/${plan.nowState.updatedAt.slice(0, 10)}.md`);
+    const dailyRelativePath = resolveDailyLogRelativePath(plan.nowState.updatedAt.slice(0, 10));
+    const dailyPath = resolve(this.rootDir, dailyRelativePath);
     mkdirSync(dirname(dailyPath), { recursive: true });
     if (!existsSync(dailyPath)) {
       writeFileSync(
@@ -100,12 +113,14 @@ export class LayeredMemoryWorkspaceStore {
       );
     }
     appendFileSync(dailyPath, `\n## ${plan.nowState.updatedAt}\n${plan.dailyAudit.map((line) => `- ${line}`).join('\n')}\n`, 'utf8');
-    writtenFiles.push(relative(this.rootDir, dailyPath).replace(/\\/g, '/'));
+    writtenFiles.push(dailyRelativePath);
 
     const allEntries = this.readEntries();
-    const memoryPath = resolve(this.rootDir, 'MEMORY.md');
+    const memoryRelativePath = resolveMemoryCoreRelativePath();
+    const memoryPath = resolve(this.rootDir, memoryRelativePath);
+    mkdirSync(dirname(memoryPath), { recursive: true });
     writeFileSync(memoryPath, renderMemoryCoreSummary(allEntries), 'utf8');
-    writtenFiles.push('MEMORY.md');
+    writtenFiles.push(memoryRelativePath);
 
     return { writtenFiles: uniqueStrings(writtenFiles) };
   }
@@ -124,8 +139,14 @@ export class LayeredMemoryWorkspaceStore {
     const relativePath = relative(this.rootDir, filePath).replace(/\\/g, '/');
     const layer = inferLayer(relativePath, parsed.frontmatter.layer);
     const updatedAt = asString(parsed.frontmatter.updated_at) ?? stats.mtime.toISOString();
+    const basename = relativePath.split('/').at(-1) ?? relativePath;
+    const namespace = {
+      sessionId: asString(parsed.frontmatter.last_session_id),
+      agentId: asString(parsed.frontmatter.last_agent_id),
+      workspaceId: asString(parsed.frontmatter.last_workspace_id),
+    };
 
-    if (relativePath === 'NOW.md') {
+    if (relativePath === 'NOW.md' || /(?:SESSION|AGENT|WORKSPACE|GLOBAL)_NOW\.md$/i.test(basename)) {
       const nowState = parseNowDocument(parsed.body);
       return {
         layer: 'hot',
@@ -136,7 +157,7 @@ export class LayeredMemoryWorkspaceStore {
         text: parsed.body.trim(),
         category: 'current-task',
         routeReason: 'Explicit NOW document capturing current state.',
-        dedupeKey: 'current-task-state',
+        dedupeKey: qualifyNamespacedDedupeKey('current-task-state', namespace),
         persistence: 'task',
         recurrence: 1,
         connectivity: Math.max(1, nowState.currentPlan.length + nowState.blockers.length + nowState.nextSteps.length),
@@ -145,15 +166,15 @@ export class LayeredMemoryWorkspaceStore {
         updatedAt,
         hitCount: 1,
         sessionCount: 1,
-        lastSessionId: asString(parsed.frontmatter.last_session_id),
-        lastAgentId: asString(parsed.frontmatter.last_agent_id),
-        lastWorkspaceId: asString(parsed.frontmatter.last_workspace_id),
+        lastSessionId: namespace.sessionId,
+        lastAgentId: namespace.agentId,
+        lastWorkspaceId: namespace.workspaceId,
         relativePath,
         content: parsed.body,
       };
     }
 
-    if (relativePath === 'MEMORY.md') {
+    if (relativePath === 'MEMORY.md' || /^GLOBAL_MEMORY\.md$/i.test(basename) || /\/GLOBAL_MEMORY\.md$/i.test(relativePath)) {
       return {
         layer: 'memory_core',
         scope: 'system',
@@ -196,9 +217,9 @@ export class LayeredMemoryWorkspaceStore {
       firstSeenAt: asString(parsed.frontmatter.first_seen_at),
       hitCount: asNumber(parsed.frontmatter.hit_count) ?? 1,
       sessionCount: asNumber(parsed.frontmatter.session_count) ?? 1,
-      lastSessionId: asString(parsed.frontmatter.last_session_id),
-      lastAgentId: asString(parsed.frontmatter.last_agent_id),
-      lastWorkspaceId: asString(parsed.frontmatter.last_workspace_id),
+      lastSessionId: namespace.sessionId,
+      lastAgentId: namespace.agentId,
+      lastWorkspaceId: namespace.workspaceId,
       relativePath,
       content: parsed.body,
     };
@@ -252,6 +273,9 @@ export class LayeredMemoryWorkspaceStore {
         layer: entry.layer,
         category: entry.category,
         dedupeKey: entry.dedupeKey,
+        lastSessionId: entry.lastSessionId,
+        lastAgentId: entry.lastAgentId,
+        lastWorkspaceId: entry.lastWorkspaceId,
       });
       const fullPath = resolve(this.rootDir, relativePath);
       mkdirSync(dirname(fullPath), { recursive: true });
@@ -268,9 +292,11 @@ export class LayeredMemoryWorkspaceStore {
       writtenFiles.push(relativePath);
     }
 
-    const memoryPath = resolve(this.rootDir, 'MEMORY.md');
+    const memoryRelativePath = resolveMemoryCoreRelativePath();
+    const memoryPath = resolve(this.rootDir, memoryRelativePath);
+    mkdirSync(dirname(memoryPath), { recursive: true });
     writeFileSync(memoryPath, renderMemoryCoreSummary([...entries, ...persistedEntries]), 'utf8');
-    writtenFiles.push('MEMORY.md');
+    writtenFiles.push(memoryRelativePath);
 
     return writtenFiles;
   }
@@ -282,12 +308,7 @@ export class LayeredMemoryWorkspaceStore {
 
     return this.collectMarkdownFiles(this.rootDir)
       .map((filePath) => relative(this.rootDir, filePath).replace(/\\/g, '/'))
-      .filter((relativePath) =>
-        relativePath.startsWith('memory/hot/')
-        || relativePath.startsWith('memory/warm/')
-        || relativePath.startsWith('memory/cold/')
-        || relativePath.startsWith('memory/archive/'),
-      );
+      .filter((relativePath) => shouldRewriteManagedLayerFile(relativePath));
   }
 }
 
@@ -417,11 +438,26 @@ function inferLayer(relativePath: string, explicit: string | undefined): MemoryL
   if (explicit === 'hot' || explicit === 'warm' || explicit === 'cold' || explicit === 'daily_log' || explicit === 'memory_core' || explicit === 'archive') {
     return explicit;
   }
-  if (relativePath === 'MEMORY.md') {
+  if (relativePath === 'MEMORY.md' || relativePath.endsWith('/GLOBAL_MEMORY.md')) {
     return 'memory_core';
   }
-  if (relativePath === 'NOW.md' || relativePath.startsWith('memory/hot/')) {
+  if (relativePath === 'NOW.md' || /(?:SESSION|AGENT|WORKSPACE|GLOBAL)_NOW\.md$/i.test(relativePath) || relativePath.startsWith('memory/hot/')) {
     return 'hot';
+  }
+  if (relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/archive/daily/`)) {
+    return 'daily_log';
+  }
+  if (relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/archive/`)) {
+    return 'archive';
+  }
+  if (relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/`) && /\/hot--/i.test(relativePath)) {
+    return 'hot';
+  }
+  if (relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/`) && /\/warm--/i.test(relativePath)) {
+    return 'warm';
+  }
+  if (relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/`) && /\/cold--/i.test(relativePath)) {
+    return 'cold';
   }
   if (relativePath.startsWith('memory/warm/')) {
     return 'warm';
@@ -479,6 +515,13 @@ function inferCategoryFromPath(relativePath: string): string {
   }
   if (normalized.startsWith('memory/hot/current-task')) {
     return 'current-task';
+  }
+  if (/SESSION_NOW\.md$/i.test(normalized)) {
+    return 'current-task';
+  }
+  const namespacedMatch = normalized.match(/\/(?:hot|warm|cold|archive)--([a-z0-9-]+)--/i);
+  if (namespacedMatch?.[1]) {
+    return namespacedMatch[1];
   }
   return slugFromPath(normalized);
 }
@@ -560,4 +603,24 @@ function uniqueStrings(values: string[]): string[] {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function shouldRewriteManagedLayerFile(relativePath: string): boolean {
+  if (!relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/`)) {
+    return false;
+  }
+
+  if (/(?:^|\/)(?:SESSION|AGENT|WORKSPACE|GLOBAL)_NOW\.md$/i.test(relativePath)) {
+    return false;
+  }
+
+  if (/\/GLOBAL_MEMORY\.md$/i.test(relativePath)) {
+    return false;
+  }
+
+  if (relativePath.startsWith(`${HYPERGRAPH_MEMORY_ROOT}/archive/daily/`)) {
+    return false;
+  }
+
+  return /\/(?:hot|warm|cold|archive)--/i.test(relativePath);
 }

@@ -432,6 +432,45 @@ test('slot-safe assemble keeps task-definition turns for current-task continuati
   );
   assert.match(assembled.systemPromptAddition ?? '', /Latest task-defining user message:/);
   assert.match(assembled.systemPromptAddition ?? '', /Latest user-defined next step:/);
+  assert.match(assembled.systemPromptAddition ?? '', /do not run memory_search or memory_get against global or cross-session memory/i);
+});
+
+test('slot-safe assemble blocks long-term memory tool recall for explicit task seed declarations', async () => {
+  const registrations: Array<{ id: string; factory: (runtimeConfig?: unknown) => unknown | Promise<unknown> }> = [];
+
+  register({
+    registerContextEngine(id, factory) {
+      registrations.push({ id, factory });
+    },
+  });
+
+  const engine = await registrations[0]!.factory({
+    disablePersistence: true,
+  }) as {
+    assemble: Function;
+  };
+
+  const assembled = await engine.assemble({
+    sessionId: 'slot-safe-seed-task',
+    sessionKey: 'slot-safe-seed-task',
+    messages: [
+      {
+        id: 'u1',
+        role: 'user',
+        content: 'Current task: alpha session isolation test. Next step: verify alpha session stays isolated.',
+        createdAt: '2026-03-24T13:00:00.000Z',
+      },
+    ],
+    tokenBudget: 320,
+  });
+
+  assert.match(assembled.systemPromptAddition ?? '', /do not run memory_search or memory_get/i);
+  assert.match(assembled.systemPromptAddition ?? '', /Do not consult MEMORY\.md, memory\/\*\.md, or unrelated long-term memory/i);
+  assert.match(assembled.systemPromptAddition ?? '', /Treat this turn as the canonical task definition for the current session/i);
+  assert.match(assembled.systemPromptAddition ?? '', /state update, not a request to execute, verify, inspect sessions, or investigate memory/i);
+  assert.match(assembled.systemPromptAddition ?? '', /do not call tools, do not inspect other sessions, do not update MEMORY\.md/i);
+  assert.match(assembled.systemPromptAddition ?? '', /Do not begin the declared next step now/i);
+  assert.match(assembled.systemPromptAddition ?? '', /Preferred reply for this turn: one short acknowledgement/i);
 });
 
 test('plugin compact returns OpenClaw-compatible compaction metadata', async () => {

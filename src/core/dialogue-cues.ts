@@ -44,6 +44,15 @@ export function looksLikeRecallIntent(text: string | null | undefined): boolean 
   return looksLikeConversationRecall(text) || looksLikeTaskContinuationQuery(text);
 }
 
+export function looksLikeTaskSeedDeclaration(text: string | null | undefined): boolean {
+  const normalized = normalizeDialogueCueText(text);
+  if (!normalized || looksLikeTaskContinuationQuery(normalized)) {
+    return false;
+  }
+
+  return isExplicitTaskDefinition(normalized) || isExplicitNextStep(normalized);
+}
+
 export type QueryGateMode =
   | 'default'
   | 'session_hot_only'
@@ -94,6 +103,10 @@ export function classifyQueryGateMode(text: string | null | undefined): QueryGat
     || looksLikeSimpleAck(text)
     || looksLikeLowInformationMetaQuery(text)
   ) {
+    return 'transcript_only';
+  }
+
+  if (looksLikeTaskSeedDeclaration(text)) {
     return 'transcript_only';
   }
 

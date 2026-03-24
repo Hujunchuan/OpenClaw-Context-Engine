@@ -11,7 +11,13 @@ import { retrieveRelevantNodes } from '../../src/core/retriever.js';
 import { materializeTaskState } from '../../src/core/task-state.js';
 import { indexLayeredMemoryEntries } from '../../src/memory/indexer.js';
 import { WorkspaceMemoryRepository } from '../../src/memory/repository.js';
-import { resolveMemoryRelativePath, routeLayeredMemory, routeMemoryCandidate } from '../../src/memory/router.js';
+import {
+  resolveMemoryCoreRelativePath,
+  resolveMemoryRelativePath,
+  resolveNowRelativePath,
+  routeLayeredMemory,
+  routeMemoryCandidate,
+} from '../../src/memory/router.js';
 import { LayeredMemoryWorkspaceStore } from '../../src/memory/workspace-store.js';
 
 test('routeMemoryCandidate classifies state, reusable patterns, and long-term facts by layer', () => {
@@ -134,18 +140,23 @@ test('workspace store writes layered markdown files and can re-index them', () =
   const result = store.writeFlush(flushPlan);
   const entries = store.readEntries();
   const indexed = indexLayeredMemoryEntries(toySessionId, entries);
+  const nowRelativePath = resolveNowRelativePath({
+    sessionId: toySessionId,
+    agentId: 'agent-layered-memory',
+    workspaceId: 'workspace-layered-memory',
+  });
 
-  assert.ok(result.writtenFiles.includes('NOW.md'));
-  assert.ok(result.writtenFiles.some((file) => file.startsWith('memory/hot/')));
-  assert.ok(result.writtenFiles.some((file) => file.startsWith('memory/warm/')));
-  assert.ok(result.writtenFiles.some((file) => file.startsWith('memory/cold/')));
-  assert.ok(existsSync(join(tempDir, 'MEMORY.md')));
+  assert.ok(result.writtenFiles.includes(nowRelativePath));
+  assert.ok(result.writtenFiles.some((file) => file.startsWith('.hypergraph-memory/session/')));
+  assert.ok(result.writtenFiles.some((file) => file.includes('/warm--')));
+  assert.ok(result.writtenFiles.some((file) => file.includes('/cold--')));
+  assert.ok(existsSync(join(tempDir, resolveMemoryCoreRelativePath())));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).layer === 'hot'));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).layer === 'warm'));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).layer === 'cold'));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).lastAgentId === 'agent-layered-memory'));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).lastWorkspaceId === 'workspace-layered-memory'));
-  assert.match(readFileSync(join(tempDir, 'MEMORY.md'), 'utf8'), /Curated Long-Term Memory/);
+  assert.match(readFileSync(join(tempDir, resolveMemoryCoreRelativePath()), 'utf8'), /Curated Long-Term Memory/);
 });
 
 test('workspace store persists memory namespace metadata into markdown frontmatter', () => {
@@ -188,7 +199,11 @@ test('workspace store persists memory namespace metadata into markdown frontmatt
     dailyAudit: ['seed namespaced hot entry'],
   });
 
-  const nowFile = readFileSync(join(tempDir, 'NOW.md'), 'utf8');
+  const nowFile = readFileSync(join(tempDir, resolveNowRelativePath({
+    sessionId: 'session-alpha',
+    agentId: 'agent-alpha',
+    workspaceId: '/workspace/alpha',
+  })), 'utf8');
   const entries = store.readEntries();
   const hotEntry = entries.find((entry) => entry.layer === 'hot' && entry.lastSessionId === 'session-alpha');
   assert.ok(hotEntry);
@@ -600,11 +615,11 @@ test('engine flushes markdown memory and a fresh engine can hydrate it back into
   assert.ok(hydratedMemory.some((node) => node.kind === 'memory_chunk'));
   assert.ok(assembled.taskState?.relevantMemories.length);
   assert.ok(
-    assembled.retrievalSummary?.some((candidate) => candidate.layer === 'hot' && candidate.sourceFile?.includes('NOW.md')),
+    assembled.retrievalSummary?.some((candidate) => candidate.layer === 'hot' && candidate.sourceFile?.includes('SESSION_NOW.md')),
   );
 
   await writer.compact(toySessionId);
-  assert.ok(existsSync(join(tempDir, 'memory', '2026-03-22.md')));
+  assert.ok(existsSync(join(tempDir, '.hypergraph-memory', 'archive', 'daily', '2026-03-22.md')));
 });
 
 test('WorkspaceMemoryRepository flushes and reloads layered memory through workspace files', async () => {
@@ -625,7 +640,7 @@ test('WorkspaceMemoryRepository flushes and reloads layered memory through works
   });
   const readResult = repository.read({ sessionId: toySessionId });
 
-  assert.ok(flushResult.writtenFiles.includes('NOW.md'));
+  assert.ok(flushResult.writtenFiles.some((file) => file.endsWith('SESSION_NOW.md')));
   assert.ok(readResult.entries.length > 0);
   assert.ok(readResult.nodes.every((node) => node.kind === 'memory_chunk'));
 });
@@ -719,12 +734,81 @@ test('WorkspaceMemoryRepository maintenance promotes qualifying entries across l
     }).dedupeKey,
   }));
 
-  assert.ok(maintenance.writtenFiles.includes('MEMORY.md'));
-  assert.equal(existsSync(join(tempDir, 'memory', 'hot', 'current-task.md')), false);
+  assert.ok(maintenance.writtenFiles.includes(resolveMemoryCoreRelativePath()));
+  assert.equal(existsSync(join(tempDir, resolveMemoryRelativePath({
+    layer: 'hot',
+    category: 'current-task',
+    dedupeKey: routeMemoryCandidate({
+      title: 'Current Task State',
+      summary: 'Implement layered memory maintenance',
+      category: 'current-task',
+      scope: 'task',
+      persistence: 'task',
+      recurrence: 3,
+      connectivity: 3,
+      activationEnergy: 'low',
+    }).dedupeKey,
+    lastSessionId: toySessionId,
+  }))), false);
   assert.ok(existsSync(warmPath));
   assert.ok(existsSync(coldPath));
   assert.ok(maintenance.entries.some((entry) => entry.layer === 'warm' && entry.title === 'Current Task State'));
   assert.ok(maintenance.entries.some((entry) => entry.layer === 'cold' && entry.title === 'Reusable Pattern'));
+});
+
+test('WorkspaceMemoryRepository maintenance preserves namespace NOW documents and daily audit logs', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-maintain-now-'));
+  const store = new LayeredMemoryWorkspaceStore(tempDir);
+  const repository = new WorkspaceMemoryRepository(tempDir);
+  const now = '2026-03-24T10:30:00.000Z';
+
+  store.writeFlush({
+    nowState: {
+      currentTask: 'Preserve session now documents during maintenance',
+      currentPlan: ['Keep SESSION_NOW.md intact'],
+      blockers: [],
+      nextSteps: ['Verify maintenance no longer deletes NOW or daily logs'],
+      updatedAt: now,
+      lastSessionId: 'session-preserve-now',
+      lastAgentId: 'agent-preserve-now',
+      lastWorkspaceId: '/workspace/preserve-now',
+    },
+    entries: [{
+      ...routeMemoryCandidate({
+        title: 'Current Task State',
+        summary: 'Preserve session now documents during maintenance',
+        category: 'current-task',
+        scope: 'task',
+        persistence: 'task',
+        recurrence: 3,
+        connectivity: 3,
+        activationEnergy: 'low',
+      }),
+      updatedAt: now,
+      firstSeenAt: '2026-03-20T10:30:00.000Z',
+      hitCount: 3,
+      sessionCount: 2,
+      lastSessionId: 'session-preserve-now',
+      lastAgentId: 'agent-preserve-now',
+      lastWorkspaceId: '/workspace/preserve-now',
+      sourceFile: '',
+    }],
+    dailyAudit: ['seed maintenance preservation test'],
+  });
+
+  repository.maintain({
+    sessionId: 'session-preserve-now',
+    agentId: 'agent-preserve-now',
+    workspaceId: '/workspace/preserve-now',
+    now,
+  });
+
+  assert.ok(existsSync(join(tempDir, resolveNowRelativePath({
+    sessionId: 'session-preserve-now',
+    agentId: 'agent-preserve-now',
+    workspaceId: '/workspace/preserve-now',
+  }))));
+  assert.ok(existsSync(join(tempDir, '.hypergraph-memory', 'archive', 'daily', '2026-03-24.md')));
 });
 
 test('engine afterTurn triggers maintenance writeback when promoteOnMaintenance is enabled', async () => {
@@ -772,7 +856,21 @@ test('engine afterTurn triggers maintenance writeback when promoteOnMaintenance 
 
   await engine.afterTurn('maintenance-only-session');
 
-  assert.equal(existsSync(join(tempDir, 'memory', 'hot', 'current-task.md')), false);
+  assert.equal(existsSync(join(tempDir, resolveMemoryRelativePath({
+    layer: 'hot',
+    category: 'current-task',
+    dedupeKey: routeMemoryCandidate({
+      title: 'Current Task State',
+      summary: 'Stabilize afterTurn maintenance',
+      category: 'current-task',
+      scope: 'task',
+      persistence: 'task',
+      recurrence: 3,
+      connectivity: 3,
+      activationEnergy: 'low',
+    }).dedupeKey,
+    lastSessionId: toySessionId,
+  }))), false);
   assert.ok(existsSync(join(tempDir, resolveMemoryRelativePath({
     layer: 'warm',
     category: 'current-task',
