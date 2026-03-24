@@ -7,6 +7,14 @@ import type {
   SummaryNodePayload,
   TaskState,
 } from '../../schemas/types.js';
+import {
+  extractExplicitNextStep,
+  extractExplicitTaskDefinition,
+  isExplicitNextStep,
+  isExplicitTaskDefinition,
+  looksLikeLowSignalStateNoise,
+  looksLikeRecallIntent,
+} from './dialogue-cues.js';
 
 const MAX_ITEMS_PER_BUCKET = 8;
 
@@ -136,9 +144,10 @@ export function materializeTaskState(sessionId: string, nodes: BaseNode[], edges
   ]);
 
   const priorityBacklog = uniqueLimited([
+    ...extractExplicitNextSteps(sortedNodes),
     ...priorityStatus
       .filter((item) => item.status === 'pending')
-      .map((item) => `Priority backlog: ${item.item}`),
+      .map((item) => item.item),
     ...(summarySeed.priorityBacklog ?? []),
   ]);
 
@@ -240,14 +249,20 @@ function isExpiredSummary(node: BaseNode | undefined): boolean {
 function selectBestIntent(intentNodes: BaseNode[]): string | undefined {
   const scored = intentNodes
     .map((node, index) => {
-      const text = readPrimaryText(node.payload);
+      const rawText = readPrimaryText(node.payload);
+      if (!rawText) {
+        return undefined;
+      }
+
+      const text = extractExplicitTaskDefinition(rawText)
+        ?? (isExplicitNextStep(rawText) ? undefined : rawText);
       if (!text) {
         return undefined;
       }
 
       return {
         text,
-        score: scoreIntentText(text, index, intentNodes.length),
+        score: scoreIntentText(rawText, text, index, intentNodes.length),
       };
     })
     .filter((value): value is { text: string; score: number } => Boolean(value))
@@ -256,11 +271,11 @@ function selectBestIntent(intentNodes: BaseNode[]): string | undefined {
   return scored[0]?.text;
 }
 
-function scoreIntentText(text: string, index: number, total: number): number {
-  const normalized = text.toLowerCase();
+function scoreIntentText(rawText: string, text: string, index: number, total: number): number {
+  const normalized = rawText.toLowerCase();
   let score = 0.2 + index / Math.max(total, 1);
 
-  if (/[.!]$/.test(text)) {
+  if (/[.!]$/.test(rawText)) {
     score += 0.05;
   }
 
@@ -272,7 +287,19 @@ function scoreIntentText(text: string, index: number, total: number): number {
     score += 0.75;
   }
 
-  if (/\?$/.test(text) || /\b(also|great|thanks|thank you|btw)\b/i.test(normalized)) {
+  if (isExplicitTaskDefinition(rawText)) {
+    score += 1.5;
+  }
+
+  if (isExplicitNextStep(rawText)) {
+    score -= 0.8;
+  }
+
+  if (looksLikeRecallIntent(rawText)) {
+    score -= 1.5;
+  }
+
+  if (/\?$/.test(rawText) || /\b(also|great|thanks|thank you|btw)\b/i.test(normalized)) {
     score -= 0.6;
   }
 
@@ -799,6 +826,10 @@ function sanitizeStateText(value: string | undefined): string | undefined {
     return undefined;
   }
 
+  if (looksLikeLowSignalStateNoise(cleaned)) {
+    return undefined;
+  }
+
   if (looksLikeTransientRuntimeState(cleaned)) {
     return undefined;
   }
@@ -818,10 +849,16 @@ function looksLikeTransientRuntimeState(value: string): boolean {
 }
 
 function looksLikeRecallOnlyOpenLoop(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return /\bwhat is the current task and the next step\b/.test(normalized)
-    || /\basked you to remember\b/.test(normalized)
-    || /\bfrom today'?s memory\b/.test(normalized)
-    || (/\bcurrent task:\b/.test(normalized) && /\bnext step:\b/.test(normalized))
-    || /\bthe context was that\b/.test(normalized);
+  return looksLikeRecallIntent(value);
+}
+
+function extractExplicitNextSteps(nodes: BaseNode[]): string[] {
+  const candidates = [...nodes]
+    .filter((node) => node.kind === 'message' || node.kind === 'intent')
+    .map((node) => readPrimaryText(node.payload))
+    .map((value) => extractExplicitNextStep(value))
+    .filter((value): value is string => Boolean(value))
+    .reverse();
+
+  return uniqueLimited(candidates);
 }

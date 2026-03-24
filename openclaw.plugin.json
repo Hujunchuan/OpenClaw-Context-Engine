@@ -27,6 +27,14 @@
         "type": "boolean",
         "description": "Write NOW.md and layered Markdown memory files during flushMemory."
       },
+      "enableQueryGate": {
+        "type": "boolean",
+        "description": "Use conversation-aware query gating so short recall or low-information turns do not overuse long-term memory."
+      },
+      "disableLongTermMemoryForConversationQueries": {
+        "type": "boolean",
+        "description": "Keep conversation-style recall focused on transcript, task state, and session-hot memory instead of warm/cold global memory."
+      },
       "flushOnAfterTurn": {
         "type": "boolean",
         "description": "Automatically flush layered memory after each turn."
@@ -38,6 +46,10 @@
       "promoteOnMaintenance": {
         "type": "boolean",
         "description": "Re-hydrate and apply lifecycle maintenance during afterTurn."
+      },
+      "runtimeIdentityDebug": {
+        "type": "boolean",
+        "description": "Append debug-only runtime identity diagnostics so real OpenClaw namespace alignment can be inspected during integration testing."
       }
     }
   }

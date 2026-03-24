@@ -78,6 +78,8 @@ test('workspace store writes layered markdown files and can re-index them', () =
         hitCount: 1,
         sessionCount: 1,
         lastSessionId: toySessionId,
+        lastAgentId: 'agent-layered-memory',
+        lastWorkspaceId: 'workspace-layered-memory',
         sourceFile: '',
         relativePath: 'memory/hot/current-task.md',
       },
@@ -98,6 +100,8 @@ test('workspace store writes layered markdown files and can re-index them', () =
         hitCount: 3,
         sessionCount: 2,
         lastSessionId: toySessionId,
+        lastAgentId: 'agent-layered-memory',
+        lastWorkspaceId: 'workspace-layered-memory',
         sourceFile: '',
         relativePath: 'memory/warm/pattern.md',
       },
@@ -118,6 +122,8 @@ test('workspace store writes layered markdown files and can re-index them', () =
         hitCount: 4,
         sessionCount: 3,
         lastSessionId: toySessionId,
+        lastAgentId: 'agent-layered-memory',
+        lastWorkspaceId: 'workspace-layered-memory',
         sourceFile: '',
         relativePath: 'memory/cold/system-principles.md',
       },
@@ -137,7 +143,112 @@ test('workspace store writes layered markdown files and can re-index them', () =
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).layer === 'hot'));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).layer === 'warm'));
   assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).layer === 'cold'));
+  assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).lastAgentId === 'agent-layered-memory'));
+  assert.ok(indexed.some((node) => (node.payload as MemoryChunkPayload).lastWorkspaceId === 'workspace-layered-memory'));
   assert.match(readFileSync(join(tempDir, 'MEMORY.md'), 'utf8'), /Curated Long-Term Memory/);
+});
+
+test('workspace store persists memory namespace metadata into markdown frontmatter', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-namespace-store-'));
+  const store = new LayeredMemoryWorkspaceStore(tempDir);
+  const now = '2026-03-24T08:00:00.000Z';
+
+  store.writeFlush({
+    nowState: {
+      currentTask: 'Isolate memory writes by namespace',
+      currentPlan: [],
+      blockers: [],
+      nextSteps: [],
+      updatedAt: now,
+      lastSessionId: 'session-alpha',
+      lastAgentId: 'agent-alpha',
+      lastWorkspaceId: '/workspace/alpha',
+    },
+    entries: [{
+      ...routeMemoryCandidate({
+        title: 'Current Task State',
+        summary: 'Isolate memory writes by session agent and workspace.',
+        category: 'current-task',
+        scope: 'task',
+        persistence: 'task',
+        recurrence: 1,
+        connectivity: 3,
+        activationEnergy: 'low',
+      }),
+      updatedAt: now,
+      firstSeenAt: now,
+      hitCount: 1,
+      sessionCount: 1,
+      lastSessionId: 'session-alpha',
+      lastAgentId: 'agent-alpha',
+      lastWorkspaceId: '/workspace/alpha',
+      sourceFile: '',
+      relativePath: 'memory/hot/current-task.md',
+    }],
+    dailyAudit: ['seed namespaced hot entry'],
+  });
+
+  const nowFile = readFileSync(join(tempDir, 'NOW.md'), 'utf8');
+  const entries = store.readEntries();
+  const hotEntry = entries.find((entry) => entry.layer === 'hot' && entry.lastSessionId === 'session-alpha');
+  assert.ok(hotEntry);
+  const hotFile = readFileSync(join(tempDir, hotEntry!.relativePath), 'utf8');
+
+  assert.match(hotFile, /last_session_id: session-alpha/);
+  assert.match(hotFile, /last_agent_id: agent-alpha/);
+  assert.match(hotFile, /last_workspace_id: \/workspace\/alpha/);
+  assert.match(nowFile, /last_session_id: session-alpha/);
+  assert.match(nowFile, /last_agent_id: agent-alpha/);
+  assert.match(nowFile, /last_workspace_id: \/workspace\/alpha/);
+  assert.ok(entries.some((entry) => entry.lastAgentId === 'agent-alpha' && entry.lastWorkspaceId === '/workspace/alpha'));
+});
+
+test('hot memory writes stay isolated across sessions and agents', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-hot-isolation-'));
+  const repository = new WorkspaceMemoryRepository(tempDir);
+  const now = '2026-03-24T09:00:00.000Z';
+  const baseTaskState = materializeTaskState('session-alpha', [], []);
+
+  repository.flush({
+    sessionId: 'session-alpha',
+    agentId: 'agent-alpha',
+    workspaceId: '/workspace/shared',
+    reason: 'manual_save',
+    nodes: [],
+    taskState: {
+      ...baseTaskState,
+      sessionId: 'session-alpha',
+      intent: 'Current task: stabilize session alpha hot memory.',
+      activeDecisions: ['Stabilize session alpha hot memory.'],
+      lastUpdatedAt: now,
+    },
+  });
+
+  repository.flush({
+    sessionId: 'session-beta',
+    agentId: 'agent-beta',
+    workspaceId: '/workspace/shared',
+    reason: 'manual_save',
+    nodes: [],
+    taskState: {
+      ...baseTaskState,
+      sessionId: 'session-beta',
+      intent: 'Current task: stabilize session beta hot memory.',
+      activeDecisions: ['Stabilize session beta hot memory.'],
+      lastUpdatedAt: now,
+    },
+  });
+
+  const entries = repository.read({
+    sessionId: 'session-beta',
+    agentId: 'agent-beta',
+    workspaceId: '/workspace/shared',
+  }).entries;
+  const hotEntries = entries.filter((entry) => entry.layer === 'hot' && entry.category === 'current-task');
+
+  assert.ok(hotEntries.some((entry) => entry.lastSessionId === 'session-alpha' && entry.lastAgentId === 'agent-alpha'));
+  assert.ok(hotEntries.some((entry) => entry.lastSessionId === 'session-beta' && entry.lastAgentId === 'agent-beta'));
+  assert.equal(new Set(hotEntries.map((entry) => entry.relativePath)).size >= 2, true);
 });
 
 test('workspace store removes stale files when a memory entry moves across layers', () => {
@@ -239,6 +350,56 @@ test('dedupe keys stay stable across minor wording changes', () => {
   assert.equal(first.dedupeKey, second.dedupeKey);
 });
 
+test('routeLayeredMemory preserves the prior hot current-task summary when the latest intent is only a recall question', () => {
+  const now = '2026-03-23T08:30:00.000Z';
+  const flushPlan = routeLayeredMemory({
+    sessionId: 'recall-intent-session',
+    reason: 'turn_end',
+    now,
+    nodes: [],
+    taskState: {
+      sessionId: 'recall-intent-session',
+      intent: 'What is the current task and the next step I asked you to remember?',
+      constraints: [],
+      activeDecisions: [],
+      candidateDecisions: [],
+      toolFacts: [],
+      artifactState: [],
+      priorityBacklog: [],
+      priorityStatus: [],
+      openLoops: [],
+      resolvedOpenLoops: [],
+      relevantMemories: [],
+      confidence: 0.9,
+      lastUpdatedAt: now,
+    },
+    existingEntries: [
+      {
+        layer: 'hot',
+        scope: 'task',
+        sourceFile: 'memory/hot/current-task.md',
+        title: 'Current Task State',
+        summary: 'Validate Hypergraph Context Engine on Ubuntu',
+        text: 'Validate Hypergraph Context Engine on Ubuntu',
+        category: 'current-task',
+        routeReason: 'Current task state',
+        dedupeKey: 'current-task-state',
+        persistence: 'task',
+        recurrence: 2,
+        connectivity: 2,
+        activationEnergy: 'low',
+        status: 'active',
+        updatedAt: '2026-03-23T08:00:00.000Z',
+      },
+    ],
+  });
+
+  const currentTaskEntry = flushPlan.entries.find((entry) => entry.category === 'current-task');
+
+  assert.equal(flushPlan.nowState.currentTask, null);
+  assert.equal(currentTaskEntry?.summary, 'Validate Hypergraph Context Engine on Ubuntu');
+});
+
 test('retrieveRelevantNodes ranks hot memory above warm and cold memory', () => {
   const nodes: BaseNode[] = [
     createMemoryNode('memory/hot/current-task.md', 'hot', 'Current task state', 'Implement layered memory now'),
@@ -256,6 +417,154 @@ test('retrieveRelevantNodes ranks hot memory above warm and cold memory', () => 
   assert.equal(retrieved.selectedNodeIds[0], 'memory:memory/hot/current-task.md');
   assert.equal(retrieved.selectedNodeIds[1], 'memory:memory/warm/pattern.md');
   assert.equal(retrieved.selectedNodeIds[2], 'memory:memory/cold/system-principles.md');
+});
+
+test('retrieveRelevantNodes prefers session then agent then workspace memory before global memory', () => {
+  const nodes: BaseNode[] = [
+    createMemoryNode(
+      'memory/warm/session-memory.md',
+      'warm',
+      'Session task memory',
+      'Current task is stabilizing slot-safe retrieval.',
+      {
+        lastSessionId: 'current-session',
+        lastAgentId: 'agent-blue',
+        lastWorkspaceId: '/workspace/blue',
+      },
+    ),
+    createMemoryNode(
+      'memory/warm/agent-memory.md',
+      'warm',
+      'Agent task memory',
+      'Current task is stabilizing slot-safe retrieval.',
+      {
+        lastSessionId: 'other-session',
+        lastAgentId: 'agent-blue',
+        lastWorkspaceId: '/workspace/other',
+      },
+    ),
+    createMemoryNode(
+      'memory/warm/workspace-memory.md',
+      'warm',
+      'Workspace task memory',
+      'Current task is stabilizing slot-safe retrieval.',
+      {
+        lastSessionId: 'other-session',
+        lastAgentId: 'agent-other',
+        lastWorkspaceId: '/workspace/blue',
+      },
+    ),
+    createMemoryNode(
+      'memory/cold/global-memory.md',
+      'cold',
+      'Global task memory',
+      'Current task is stabilizing slot-safe retrieval.',
+      {
+        lastSessionId: 'other-session',
+        lastAgentId: 'agent-other',
+        lastWorkspaceId: '/workspace/other',
+      },
+    ),
+  ];
+  const taskState = materializeTaskState('current-session', nodes, []);
+  const retrieved = retrieveRelevantNodes({
+    nodes,
+    taskState,
+    currentTurnText: 'What is the current task and next step?',
+    limit: 4,
+    memoryNamespace: {
+      sessionId: 'current-session',
+      agentId: 'agent-blue',
+      workspaceId: '/workspace/blue',
+    },
+  });
+
+  assert.deepEqual(retrieved.selectedNodeIds, [
+    'memory:memory/warm/session-memory.md',
+    'memory:memory/warm/agent-memory.md',
+    'memory:memory/warm/workspace-memory.md',
+    'memory:memory/cold/global-memory.md',
+  ]);
+});
+
+test('repository query gate can skip long-term memory or keep only session-hot memory', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-query-gate-'));
+  const store = new LayeredMemoryWorkspaceStore(tempDir);
+  const now = '2026-03-24T11:00:00.000Z';
+
+  store.writeFlush({
+    nowState: {
+      currentTask: 'Session alpha task',
+      currentPlan: [],
+      blockers: [],
+      nextSteps: [],
+      updatedAt: now,
+      lastSessionId: 'session-alpha',
+      lastAgentId: 'agent-alpha',
+      lastWorkspaceId: '/workspace/shared',
+    },
+    entries: [
+      {
+        ...routeMemoryCandidate({
+          title: 'Current Task State',
+          summary: 'Session alpha task',
+          category: 'current-task',
+          scope: 'task',
+          persistence: 'task',
+          recurrence: 1,
+          connectivity: 2,
+          activationEnergy: 'low',
+        }),
+        updatedAt: now,
+        firstSeenAt: now,
+        hitCount: 1,
+        sessionCount: 1,
+        lastSessionId: 'session-alpha',
+        lastAgentId: 'agent-alpha',
+        lastWorkspaceId: '/workspace/shared',
+        sourceFile: '',
+      },
+      {
+        ...routeMemoryCandidate({
+          title: 'Global Principle',
+          summary: 'Transcript stays the source of truth.',
+          category: 'system-principles',
+          scope: 'system',
+          persistence: 'long_term',
+          recurrence: 4,
+          connectivity: 4,
+          activationEnergy: 'high',
+        }),
+        updatedAt: now,
+        firstSeenAt: '2026-03-01T11:00:00.000Z',
+        hitCount: 4,
+        sessionCount: 3,
+        lastSessionId: 'other-session',
+        lastAgentId: 'agent-other',
+        lastWorkspaceId: '/workspace/other',
+        sourceFile: '',
+      },
+    ],
+    dailyAudit: ['seed query-gate memory'],
+  });
+
+  const repository = new WorkspaceMemoryRepository(tempDir);
+  const sessionHotOnly = repository.read({
+    sessionId: 'session-alpha',
+    agentId: 'agent-alpha',
+    workspaceId: '/workspace/shared',
+    queryGateMode: 'session_hot_only',
+  });
+  const transcriptOnly = repository.read({
+    sessionId: 'session-alpha',
+    agentId: 'agent-alpha',
+    workspaceId: '/workspace/shared',
+    queryGateMode: 'transcript_only',
+  });
+
+  assert.ok(sessionHotOnly.entries.every((entry) => entry.layer === 'hot' && entry.lastSessionId === 'session-alpha'));
+  assert.equal(transcriptOnly.entries.length, 0);
+  assert.equal(transcriptOnly.nodes.length, 0);
 });
 
 test('engine flushes markdown memory and a fresh engine can hydrate it back into assemble', async () => {
@@ -504,7 +813,17 @@ test('routeLayeredMemory emits hot entries from current task state and stable pr
   assert.ok(routed.entries.some((entry) => entry.layer === 'cold'));
 });
 
-function createMemoryNode(relativePath: string, layer: MemoryChunkPayload['layer'], title: string, summary: string): BaseNode {
+function createMemoryNode(
+  relativePath: string,
+  layer: MemoryChunkPayload['layer'],
+  title: string,
+  summary: string,
+  namespace: {
+    lastSessionId?: string;
+    lastAgentId?: string;
+    lastWorkspaceId?: string;
+  } = {},
+): BaseNode {
   return {
     id: `memory:${relativePath}`,
     kind: 'memory_chunk',
@@ -525,6 +844,7 @@ function createMemoryNode(relativePath: string, layer: MemoryChunkPayload['layer
       activationEnergy: layer === 'hot' ? 'low' : layer === 'warm' ? 'medium' : 'high',
       status: 'active',
       updatedAt: '2026-03-22T00:00:00.000Z',
+      ...namespace,
     } satisfies MemoryChunkPayload,
   };
 }

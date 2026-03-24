@@ -21,6 +21,9 @@ test('OpenClawHypergraphAdapter simulates runtime ingest + assemble', async () =
   assert.ok((assembled.messages?.length ?? 0) > 0);
   assert.match(assembled.systemPromptAddition ?? '', /HypergraphContextEngine assembled task-state-guided context/);
   assert.equal(assembled.messages[0]?.source, 'hypergraph-context-engine');
+  assert.equal(typeof assembled.messages[0]?.role, 'string');
+  assert.equal(typeof assembled.messages[0]?.content, 'string');
+  assert.equal('kind' in (assembled.messages[0] ?? {}), false);
   assert.ok((assembled.debug?.bucketSummary?.length ?? 0) > 0);
   assert.ok(assembled.debug?.taskState?.intent);
 });

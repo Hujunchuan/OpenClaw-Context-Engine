@@ -7,9 +7,12 @@ export interface ContextEnginePluginConfig {
   memoryWorkspaceRoot?: string;
   enableLayeredRead?: boolean;
   enableLayeredWrite?: boolean;
+  enableQueryGate?: boolean;
+  disableLongTermMemoryForConversationQueries?: boolean;
   flushOnAfterTurn?: boolean;
   flushOnCompact?: boolean;
   promoteOnMaintenance?: boolean;
+  runtimeIdentityDebug?: boolean;
 }
 
 export type ContextEngineConfigInput =
@@ -26,9 +29,12 @@ export interface ResolvedContextEngineConfig {
   memoryWorkspaceRoot: string;
   enableLayeredRead: boolean;
   enableLayeredWrite: boolean;
+  enableQueryGate: boolean;
+  disableLongTermMemoryForConversationQueries: boolean;
   flushOnAfterTurn: boolean;
   flushOnCompact: boolean;
   promoteOnMaintenance: boolean;
+  runtimeIdentityDebug: boolean;
 }
 
 export const CONTEXT_ENGINE_PLUGIN_INFO = {
@@ -64,6 +70,14 @@ export const CONTEXT_ENGINE_CONFIG_SCHEMA = {
       type: 'boolean',
       description: 'Write NOW.md and layered Markdown memory files during flushMemory.',
     },
+    enableQueryGate: {
+      type: 'boolean',
+      description: 'Use conversation-aware query gating so short recall or low-information turns do not overuse long-term memory.',
+    },
+    disableLongTermMemoryForConversationQueries: {
+      type: 'boolean',
+      description: 'Keep conversation-style recall focused on transcript, task state, and session-hot memory instead of warm/cold global memory.',
+    },
     flushOnAfterTurn: {
       type: 'boolean',
       description: 'Automatically flush layered memory after each turn.',
@@ -75,6 +89,10 @@ export const CONTEXT_ENGINE_CONFIG_SCHEMA = {
     promoteOnMaintenance: {
       type: 'boolean',
       description: 'Re-hydrate and apply lifecycle maintenance during afterTurn.',
+    },
+    runtimeIdentityDebug: {
+      type: 'boolean',
+      description: 'Append debug-only runtime identity diagnostics so real OpenClaw namespace alignment can be inspected during integration testing.',
     },
   },
 } as const;
@@ -90,9 +108,18 @@ export function normalizeContextEngineConfig(input?: ContextEngineConfigInput): 
     memoryWorkspaceRoot: resolveMemoryWorkspaceRoot(runtimeConfig.memoryWorkspaceRoot),
     enableLayeredRead: runtimeConfig.enableLayeredRead ?? true,
     enableLayeredWrite: runtimeConfig.enableLayeredWrite ?? true,
+    enableQueryGate: runtimeConfig.enableQueryGate ?? readBooleanEnv('OPENCLAW_CONTEXT_ENGINE_ENABLE_QUERY_GATE') ?? true,
+    disableLongTermMemoryForConversationQueries:
+      runtimeConfig.disableLongTermMemoryForConversationQueries
+      ?? readBooleanEnv('OPENCLAW_CONTEXT_ENGINE_DISABLE_LONG_TERM_MEMORY_FOR_CONVERSATION_QUERIES')
+      ?? true,
     flushOnAfterTurn: runtimeConfig.flushOnAfterTurn ?? true,
     flushOnCompact: runtimeConfig.flushOnCompact ?? true,
     promoteOnMaintenance: runtimeConfig.promoteOnMaintenance ?? true,
+    runtimeIdentityDebug:
+      runtimeConfig.runtimeIdentityDebug
+      ?? readBooleanEnv('OPENCLAW_CONTEXT_ENGINE_RUNTIME_IDENTITY_DEBUG')
+      ?? false,
   };
 }
 

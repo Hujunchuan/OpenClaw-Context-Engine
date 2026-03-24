@@ -26,6 +26,8 @@ export function toMemoryChunkNode(sessionId: string, entry: StoredMemoryEntry): 
     hitCount: entry.hitCount,
     sessionCount: entry.sessionCount,
     lastSessionId: entry.lastSessionId,
+    lastAgentId: entry.lastAgentId,
+    lastWorkspaceId: entry.lastWorkspaceId,
   };
 
   return {

@@ -19,7 +19,7 @@ test('plugin manifest stays aligned with shared plugin metadata and config schem
     id: string;
     name: string;
     version: string;
-    kind: string;
+    kind?: string;
     description: string;
     configSchema: unknown;
   };
@@ -27,9 +27,9 @@ test('plugin manifest stays aligned with shared plugin metadata and config schem
   assert.equal(manifest.id, CONTEXT_ENGINE_PLUGIN_INFO.id);
   assert.equal(manifest.name, CONTEXT_ENGINE_PLUGIN_INFO.name);
   assert.equal(manifest.version, CONTEXT_ENGINE_PLUGIN_INFO.version);
-  assert.equal(manifest.kind, CONTEXT_ENGINE_PLUGIN_INFO.kind);
   assert.equal(manifest.description, CONTEXT_ENGINE_PLUGIN_INFO.description);
   assert.deepEqual(manifest.configSchema, CONTEXT_ENGINE_CONFIG_SCHEMA);
+  assert.equal(manifest.kind ?? undefined, undefined);
 });
 
 test('normalizeContextEngineConfig applies defaults from the shared config module', () => {
@@ -46,6 +46,9 @@ test('normalizeContextEngineConfig applies defaults from the shared config modul
   assert.equal(config.flushOnCompact, false);
   assert.equal(config.enableLayeredRead, true);
   assert.equal(config.enableLayeredWrite, true);
+  assert.equal(config.enableQueryGate, true);
+  assert.equal(config.disableLongTermMemoryForConversationQueries, true);
+  assert.equal(config.runtimeIdentityDebug, false);
   assert.ok(config.memoryWorkspaceRoot.endsWith('memory-root'));
 });
 
@@ -68,6 +71,14 @@ test('runtime adapter cache key changes when behavior-affecting config changes',
     flushOnCompact: true,
     promoteOnMaintenance: true,
   });
+  const queryGateChanged = getOrCreateRuntimeAdapter({
+    dbPath,
+    memoryWorkspaceRoot,
+    flushOnAfterTurn: false,
+    flushOnCompact: true,
+    promoteOnMaintenance: true,
+    enableQueryGate: false,
+  });
   const repeated = getOrCreateRuntimeAdapter({
     dbPath,
     memoryWorkspaceRoot,
@@ -77,5 +88,6 @@ test('runtime adapter cache key changes when behavior-affecting config changes',
   });
 
   assert.notEqual(baseline, changed);
+  assert.notEqual(changed, queryGateChanged);
   assert.equal(changed, repeated);
 });

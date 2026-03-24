@@ -1,4 +1,4 @@
-import type { BaseNode, FlushReason, TaskState } from '../../schemas/types.js';
+import type { BaseNode, FlushReason, MemoryNamespaceContext, TaskState } from '../../schemas/types.js';
 import { assembleContext } from './assemble.js';
 import { compactSession } from './compact.js';
 import { createInMemoryEngineState, ingestTranscriptEntry } from './ingest.js';
@@ -6,6 +6,7 @@ import type { MemoryRepository } from '../memory/repository.js';
 import { WorkspaceMemoryRepository } from '../memory/repository.js';
 import type { PersistableSessionSnapshot, SQLiteStore } from './sqlite-store.js';
 import { materializeTaskState } from './task-state.js';
+import { classifyQueryGateMode, type QueryGateMode } from './dialogue-cues.js';
 
 export interface TranscriptEntryLike {
   id: string;
@@ -21,6 +22,8 @@ export interface AssembleInput {
   sessionId: string;
   currentTurnText?: string;
   tokenBudget: number;
+  agentId?: string;
+  workspaceId?: string;
 }
 
 export interface AssembleOutput {
@@ -60,10 +63,15 @@ export interface HypergraphContextEngineOptions {
   memoryWorkspaceRoot?: string;
   enableLayeredRead?: boolean;
   enableLayeredWrite?: boolean;
+  enableQueryGate?: boolean;
+  disableLongTermMemoryForConversationQueries?: boolean;
   flushOnAfterTurn?: boolean;
   flushOnCompact?: boolean;
   promoteOnMaintenance?: boolean;
+  runtimeIdentityDebug?: boolean;
 }
+
+type NamespaceHints = Pick<MemoryNamespaceContext, 'agentId' | 'workspaceId'>;
 
 export class HypergraphContextEngine {
   private readonly state = createInMemoryEngineState();
@@ -71,6 +79,8 @@ export class HypergraphContextEngine {
   private readonly memoryRepository?: MemoryRepository;
   private readonly enableLayeredRead: boolean;
   private readonly enableLayeredWrite: boolean;
+  private readonly enableQueryGate: boolean;
+  private readonly disableLongTermMemoryForConversationQueries: boolean;
   private readonly flushOnAfterTurn: boolean;
   private readonly flushOnCompact: boolean;
   private readonly promoteOnMaintenance: boolean;
@@ -80,9 +90,12 @@ export class HypergraphContextEngine {
     this.memoryRepository = options.memoryRepository ?? (options.memoryWorkspaceRoot ? new WorkspaceMemoryRepository(options.memoryWorkspaceRoot) : undefined);
     this.enableLayeredRead = options.enableLayeredRead ?? Boolean(this.memoryRepository);
     this.enableLayeredWrite = options.enableLayeredWrite ?? Boolean(this.memoryRepository);
+    this.enableQueryGate = options.enableQueryGate ?? true;
+    this.disableLongTermMemoryForConversationQueries = options.disableLongTermMemoryForConversationQueries ?? true;
     this.flushOnAfterTurn = options.flushOnAfterTurn ?? this.enableLayeredWrite;
     this.flushOnCompact = options.flushOnCompact ?? this.enableLayeredWrite;
     this.promoteOnMaintenance = options.promoteOnMaintenance ?? true;
+    void options.runtimeIdentityDebug;
   }
 
   async ingest(sessionId: string, entry: TranscriptEntryLike): Promise<void> {
@@ -125,7 +138,7 @@ export class HypergraphContextEngine {
   }
 
   async assemble(input: AssembleInput): Promise<AssembleOutput> {
-    const snapshot = this.buildAssembleSnapshot(input.sessionId);
+    const snapshot = this.buildAssembleSnapshot(input.sessionId, input);
     const result = assembleContext(snapshot, input);
 
     return {
@@ -153,9 +166,9 @@ export class HypergraphContextEngine {
     });
   }
 
-  async compact(sessionId: string): Promise<CompactOutput> {
+  async compact(sessionId: string, namespace?: NamespaceHints): Promise<CompactOutput> {
     if (this.flushOnCompact) {
-      await this.flushMemory(sessionId, 'compaction');
+      await this.flushMemory(sessionId, 'compaction', namespace);
     }
 
     const snapshot = this.requireSession(sessionId);
@@ -181,13 +194,13 @@ export class HypergraphContextEngine {
     };
   }
 
-  async afterTurn(sessionId: string, taskState?: TaskState): Promise<void> {
+  async afterTurn(sessionId: string, taskState?: TaskState, namespace?: NamespaceHints): Promise<void> {
     if (this.flushOnAfterTurn) {
-      await this.flushMemory(sessionId, 'turn_end');
+      await this.flushMemory(sessionId, 'turn_end', namespace);
     }
 
     if (this.promoteOnMaintenance) {
-      this.memoryRepository?.maintain({ sessionId });
+      this.memoryRepository?.maintain({ sessionId, ...namespace });
     }
 
     void taskState;
@@ -205,7 +218,11 @@ export class HypergraphContextEngine {
     return this.requireSession(sessionId);
   }
 
-  async flushMemory(sessionId: string, reason: FlushReason): Promise<{ writtenFiles: string[]; notes: string[] }> {
+  async flushMemory(
+    sessionId: string,
+    reason: FlushReason,
+    namespace?: NamespaceHints,
+  ): Promise<{ writtenFiles: string[]; notes: string[] }> {
     if (!this.enableLayeredWrite || !this.memoryRepository) {
       return {
         writtenFiles: [],
@@ -217,6 +234,7 @@ export class HypergraphContextEngine {
     const taskState = materializeTaskState(sessionId, snapshot.nodes, snapshot.edges);
     const result = this.memoryRepository.flush({
       sessionId,
+      ...namespace,
       taskState,
       nodes: snapshot.nodes,
       reason,
@@ -228,12 +246,12 @@ export class HypergraphContextEngine {
     };
   }
 
-  hydrateMemory(sessionId: string): BaseNode[] {
+  hydrateMemory(sessionId: string, namespace?: NamespaceHints, queryGateMode: QueryGateMode = 'default'): BaseNode[] {
     if (!this.enableLayeredRead || !this.memoryRepository) {
       return [];
     }
 
-    return this.memoryRepository.read({ sessionId }).nodes;
+    return this.memoryRepository.read({ sessionId, ...namespace, queryGateMode }).nodes;
   }
 
   private requireSession(sessionId: string): PersistableSessionSnapshot | undefined {
@@ -291,13 +309,20 @@ export class HypergraphContextEngine {
     return created;
   }
 
-  private buildAssembleSnapshot(sessionId: string): PersistableSessionSnapshot | undefined {
+  private buildAssembleSnapshot(
+    sessionId: string,
+    input?: AssembleInput,
+  ): PersistableSessionSnapshot | undefined {
     const baseSnapshot = this.requireSession(sessionId);
     if (!baseSnapshot) {
       return undefined;
     }
 
-    const memoryNodes = this.hydrateMemory(sessionId);
+    const memoryNodes = this.hydrateMemory(
+      sessionId,
+      input,
+      this.resolveAssembleQueryGateMode(input?.currentTurnText),
+    );
     if (memoryNodes.length === 0) {
       return baseSnapshot;
     }
@@ -313,6 +338,19 @@ export class HypergraphContextEngine {
       ...snapshot,
       nodes: stripTransientMemoryNodes(snapshot.nodes),
     };
+  }
+
+  private resolveAssembleQueryGateMode(currentTurnText?: string): QueryGateMode {
+    if (!this.enableQueryGate) {
+      return 'default';
+    }
+
+    const mode = classifyQueryGateMode(currentTurnText);
+    if (mode === 'session_hot_only' && !this.disableLongTermMemoryForConversationQueries) {
+      return 'default';
+    }
+
+    return mode;
   }
 }
 

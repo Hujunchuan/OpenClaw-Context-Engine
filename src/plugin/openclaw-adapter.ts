@@ -7,11 +7,14 @@ import {
 } from '../core/engine.js';
 import type { MemoryRepository } from '../memory/repository.js';
 import type { SQLiteStore } from '../core/sqlite-store.js';
+import { toRuntimeContextMessage } from './runtime-message-utils.js';
 
 export interface OpenClawAdapterAssembleParams {
   sessionId: string;
   currentTurnText?: string;
   tokenBudget: number;
+  agentId?: string;
+  workspaceId?: string;
 }
 
 export interface OpenClawAdapterAssembleResult {
@@ -40,9 +43,12 @@ export interface OpenClawHypergraphAdapterOptions {
   memoryWorkspaceRoot?: string;
   enableLayeredRead?: boolean;
   enableLayeredWrite?: boolean;
+  enableQueryGate?: boolean;
+  disableLongTermMemoryForConversationQueries?: boolean;
   flushOnAfterTurn?: boolean;
   flushOnCompact?: boolean;
   promoteOnMaintenance?: boolean;
+  runtimeIdentityDebug?: boolean;
 }
 
 /**
@@ -83,10 +89,14 @@ export class OpenClawHypergraphAdapter {
         sessionId: params.sessionId,
         currentTurnText: params.currentTurnText,
         tokenBudget: params.tokenBudget,
+        agentId: params.agentId,
+        workspaceId: params.workspaceId,
       });
 
       return {
-        messages: output.messages.map(toRuntimeContextMessage),
+        messages: output.messages
+          .map(toRuntimeContextMessage)
+          .filter((message): message is Record<string, unknown> => Boolean(message)),
         systemPromptAddition: output.systemPromptAddition,
         debug: {
           taskState: output.taskState,
@@ -119,16 +129,21 @@ export class OpenClawHypergraphAdapter {
     }
   }
 
-  async compact(params: { sessionId: string }): Promise<OpenClawAdapterCompactResult> {
-    return this.engine.compact(params.sessionId);
+  async compact(params: { sessionId: string; agentId?: string; workspaceId?: string }): Promise<OpenClawAdapterCompactResult> {
+    return this.engine.compact(params.sessionId, params);
   }
 
-  async flushMemory(params: { sessionId: string; reason: FlushReason }): Promise<{ writtenFiles: string[]; notes: string[] }> {
-    return this.engine.flushMemory(params.sessionId, params.reason);
+  async flushMemory(params: {
+    sessionId: string;
+    reason: FlushReason;
+    agentId?: string;
+    workspaceId?: string;
+  }): Promise<{ writtenFiles: string[]; notes: string[] }> {
+    return this.engine.flushMemory(params.sessionId, params.reason, params);
   }
 
-  async afterTurn(params: { sessionId: string; taskState?: TaskState }): Promise<void> {
-    await this.engine.afterTurn(params.sessionId, params.taskState);
+  async afterTurn(params: { sessionId: string; taskState?: TaskState; agentId?: string; workspaceId?: string }): Promise<void> {
+    await this.engine.afterTurn(params.sessionId, params.taskState, params);
   }
 }
 
@@ -139,9 +154,12 @@ function toEngineOptions(options: OpenClawHypergraphAdapterOptions): HypergraphC
     memoryWorkspaceRoot: options.memoryWorkspaceRoot,
     enableLayeredRead: options.enableLayeredRead,
     enableLayeredWrite: options.enableLayeredWrite,
+    enableQueryGate: options.enableQueryGate,
+    disableLongTermMemoryForConversationQueries: options.disableLongTermMemoryForConversationQueries,
     flushOnAfterTurn: options.flushOnAfterTurn,
     flushOnCompact: options.flushOnCompact,
     promoteOnMaintenance: options.promoteOnMaintenance,
+    runtimeIdentityDebug: options.runtimeIdentityDebug,
   };
 }
 
@@ -152,9 +170,3 @@ function normalizeTranscriptEntry(entry: TranscriptEntryLike): TranscriptEntryLi
   };
 }
 
-function toRuntimeContextMessage(message: Record<string, unknown>): Record<string, unknown> {
-  return {
-    ...message,
-    source: 'hypergraph-context-engine',
-  };
-}

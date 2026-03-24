@@ -1,4 +1,12 @@
-import type { BaseNode, GraphEdge, MemoryChunkPayload, RetrievalCandidate, TaskState } from '../../schemas/types.js';
+import type {
+  BaseNode,
+  GraphEdge,
+  MemoryChunkPayload,
+  MemoryNamespaceContext,
+  RetrievalCandidate,
+  TaskState,
+} from '../../schemas/types.js';
+import { looksLikeConversationRecall, looksLikeTaskContinuationQuery } from './dialogue-cues.js';
 
 export interface RetrieveInput {
   nodes: BaseNode[];
@@ -6,6 +14,7 @@ export interface RetrieveInput {
   taskState: TaskState;
   currentTurnText?: string;
   limit?: number;
+  memoryNamespace?: MemoryNamespaceContext;
 }
 
 export interface RetrieveOutput {
@@ -13,8 +22,16 @@ export interface RetrieveOutput {
   selectedNodeIds: string[];
 }
 
+type MemoryQueryMode = 'default' | 'conversation_recall' | 'task_continuation';
+
 export function retrieveRelevantNodes(input: RetrieveInput): RetrieveOutput {
-  const scored = scoreCandidates(input.nodes, input.taskState, input.currentTurnText, input.edges ?? []);
+  const scored = scoreCandidates(
+    input.nodes,
+    input.taskState,
+    input.currentTurnText,
+    input.edges ?? [],
+    input.memoryNamespace,
+  );
   const limit = Math.max(1, input.limit ?? Math.min(12, input.nodes.length));
 
   return {
@@ -28,9 +45,11 @@ export function scoreCandidates(
   taskState: TaskState,
   currentTurnText?: string,
   edges: GraphEdge[] = [],
+  memoryNamespace?: MemoryNamespaceContext,
 ): RetrievalCandidate[] {
   const currentText = (currentTurnText ?? '').toLowerCase();
   const edgeIndex = buildEdgeIndex(edges);
+  const queryMode = classifyMemoryQueryMode(currentTurnText);
 
   return nodes
     .map((node, index) => {
@@ -41,8 +60,9 @@ export function scoreCandidates(
       const utilityScore = utility(node.kind);
       const redundancyPenalty = index > 0 && nodes[index - 1]?.kind === node.kind ? 0.15 : 0;
       const layerWeight = resolveLayerWeight(node);
+      const namespaceWeight = resolveNamespaceWeight(node, memoryNamespace, queryMode);
       const finalScore = Number(
-        ((0.35 * graphScore + 0.25 * retrievalScore + 0.2 * recencyScore + 0.2 * utilityScore) * layerWeight - redundancyPenalty).toFixed(3),
+        ((0.35 * graphScore + 0.25 * retrievalScore + 0.2 * recencyScore + 0.2 * utilityScore) * layerWeight * namespaceWeight - redundancyPenalty).toFixed(3),
       );
 
       return {
@@ -82,6 +102,88 @@ function resolveLayerWeight(node: BaseNode): number {
   }
 }
 
+function resolveNamespaceWeight(
+  node: BaseNode,
+  namespace: MemoryNamespaceContext | undefined,
+  queryMode: MemoryQueryMode,
+): number {
+  if (node.kind !== 'memory_chunk') {
+    return 1;
+  }
+
+  if (!namespace) {
+    return 1;
+  }
+
+  const payload = node.payload as Partial<MemoryChunkPayload> | undefined;
+  const layer = payload?.layer;
+  const sessionMatch = Boolean(namespace?.sessionId && payload?.lastSessionId === namespace.sessionId);
+  const agentMatch = Boolean(namespace?.agentId && payload?.lastAgentId === namespace.agentId);
+  const workspaceMatch = Boolean(namespace?.workspaceId && payload?.lastWorkspaceId === namespace.workspaceId);
+
+  if (sessionMatch) {
+    return 1.45;
+  }
+
+  if (agentMatch) {
+    return 1.3;
+  }
+
+  if (workspaceMatch) {
+    return 1.1;
+  }
+
+  if (queryMode === 'conversation_recall') {
+    switch (layer) {
+      case 'cold':
+      case 'memory_core':
+        return 0.55;
+      case 'warm':
+        return 0.3;
+      case 'hot':
+      case 'daily_log':
+        return 0.2;
+      case 'archive':
+        return 0.1;
+      default:
+        return 0.35;
+    }
+  }
+
+  if (queryMode === 'task_continuation') {
+    switch (layer) {
+      case 'cold':
+      case 'memory_core':
+        return 0.7;
+      case 'warm':
+        return 0.45;
+      case 'hot':
+      case 'daily_log':
+        return 0.25;
+      case 'archive':
+        return 0.12;
+      default:
+        return 0.4;
+    }
+  }
+
+  switch (layer) {
+    case 'cold':
+    case 'memory_core':
+      return 0.82;
+    case 'warm':
+      return 0.62;
+    case 'hot':
+      return 0.48;
+    case 'daily_log':
+      return 0.35;
+    case 'archive':
+      return 0.18;
+    default:
+      return 0.5;
+  }
+}
+
 function graphAffinity(node: BaseNode, taskState: TaskState, edgeIndex: Map<string, GraphEdge[]>): number {
   const text = JSON.stringify(node.payload).toLowerCase();
   const probes = [
@@ -105,6 +207,19 @@ function graphAffinity(node: BaseNode, taskState: TaskState, edgeIndex: Map<stri
 
   const relationBoost = edgeRelationBoost(node, edgeIndex);
   return Math.min(1, Number((baseScore + relationBoost).toFixed(3)));
+}
+
+function classifyMemoryQueryMode(currentTurnText?: string): MemoryQueryMode {
+  const text = currentTurnText ?? '';
+  if (looksLikeConversationRecall(text)) {
+    return 'conversation_recall';
+  }
+
+  if (looksLikeTaskContinuationQuery(text)) {
+    return 'task_continuation';
+  }
+
+  return 'default';
 }
 
 function edgeRelationBoost(node: BaseNode, edgeIndex: Map<string, GraphEdge[]>): number {

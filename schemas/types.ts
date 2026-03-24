@@ -49,6 +49,12 @@ export type FlushReason =
   | 'manual_reset'
   | 'manual_new';
 
+export interface MemoryNamespaceContext {
+  sessionId: string;
+  agentId?: string;
+  workspaceId?: string;
+}
+
 export interface RelevantMemoryRef {
   nodeId: string;
   layer: MemoryLayer;
@@ -79,6 +85,8 @@ export interface MemoryChunkPayload extends Record<string, unknown> {
   hitCount?: number;
   sessionCount?: number;
   lastSessionId?: string;
+  lastAgentId?: string;
+  lastWorkspaceId?: string;
 }
 
 export interface BaseNode {

@@ -1,6 +1,20 @@
 import type { OpenClawAdapterAssembleResult } from './openclaw-adapter.js';
-import { CONTEXT_ENGINE_PLUGIN_INFO, type ContextEnginePluginConfig } from './config.js';
+import {
+  CONTEXT_ENGINE_PLUGIN_INFO,
+  normalizeContextEngineConfig,
+  type ContextEnginePluginConfig,
+} from './config.js';
 import { getOrCreateRuntimeAdapter } from './runtime-adapter.js';
+import {
+  extractLatestUserTextFromRuntimeMessages,
+  normalizeRuntimeContentToText,
+  shouldSyncRuntimeMessage,
+} from './runtime-message-utils.js';
+import {
+  rememberRuntimeIdentityObservation,
+  resolveCanonicalRuntimeIdentity,
+  writeRuntimeIdentityDiagnostic,
+} from './runtime-identity.js';
 
 type HookLogger = {
   info?: (message: string) => void;
@@ -26,9 +40,12 @@ type BeforeAgentStartEvent = {
 };
 
 type BeforeAgentStartContext = {
+  sessionId?: string;
   agentId?: string;
   sessionKey?: string;
+  sessionFile?: string;
   workspaceDir?: string;
+  runtimeContext?: Record<string, unknown>;
   messageProvider?: string;
 };
 
@@ -49,7 +66,8 @@ const MAX_PREPEND_CONTEXT_CHARS = 3600;
 const MAX_CONTEXT_ITEMS = 6;
 
 export function registerOpenClawHookBridge(api: HookApi): void {
-  const adapter = getOrCreateRuntimeAdapter(api.pluginConfig as ContextEnginePluginConfig | undefined);
+  const resolvedConfig = normalizeContextEngineConfig(api.pluginConfig as ContextEnginePluginConfig | undefined);
+  const adapter = getOrCreateRuntimeAdapter(resolvedConfig);
   const logger = api.logger;
 
   logger?.info?.(
@@ -59,19 +77,35 @@ export function registerOpenClawHookBridge(api: HookApi): void {
   api.on(
     'before_agent_start',
     async (event: BeforeAgentStartEvent, ctx: BeforeAgentStartContext) => {
-      const sessionId = resolveHookSessionId(ctx);
+      const identity = resolveCanonicalRuntimeIdentity({
+        ...ctx,
+        prompt: event.prompt,
+      });
+      writeRuntimeIdentityDiagnostic({
+        enabled: resolvedConfig.runtimeIdentityDebug,
+        memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+        lifecycle: 'hook:before_agent_start',
+        resolution: identity,
+      });
+      const sessionId = identity.namespace.sessionId;
       if (!sessionId) {
         logger?.warn?.(`[${CONTEXT_ENGINE_PLUGIN_INFO.id}] skipped before_agent_start: missing session identity.`);
         return;
       }
 
       const messages = normalizeHookMessages(event.messages);
+      rememberRuntimeIdentityObservation({
+        namespace: identity.namespace,
+        messages,
+      });
       await syncHookMessages(adapter, sessionId, messages);
 
       const assembled = await adapter.assemble({
         sessionId,
-        currentTurnText: extractLatestUserText(messages) ?? event.prompt,
+        currentTurnText: extractLatestUserTextFromRuntimeMessages(messages) ?? event.prompt,
         tokenBudget: DEFAULT_TOKEN_BUDGET,
+        agentId: identity.namespace.agentId,
+        workspaceId: identity.namespace.workspaceId,
       });
 
       const prependContext = buildHookPrependContext(assembled);
@@ -92,14 +126,29 @@ export function registerOpenClawHookBridge(api: HookApi): void {
   api.on(
     'agent_end',
     async (event: AgentEndEvent, ctx: AgentHookContext) => {
-      const sessionId = resolveHookSessionId(ctx);
+      const identity = resolveCanonicalRuntimeIdentity(ctx as Record<string, unknown>);
+      writeRuntimeIdentityDiagnostic({
+        enabled: resolvedConfig.runtimeIdentityDebug,
+        memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+        lifecycle: 'hook:agent_end',
+        resolution: identity,
+      });
+      const sessionId = identity.namespace.sessionId;
       if (!sessionId) {
         return;
       }
 
       const messages = normalizeHookMessages(event.messages);
+      rememberRuntimeIdentityObservation({
+        namespace: identity.namespace,
+        messages,
+      });
       await syncHookMessages(adapter, sessionId, messages);
-      await adapter.afterTurn({ sessionId });
+      await adapter.afterTurn({
+        sessionId,
+        agentId: identity.namespace.agentId,
+        workspaceId: identity.namespace.workspaceId,
+      });
       logger?.debug?.(
         `[${CONTEXT_ENGINE_PLUGIN_INFO.id}] completed agent_end maintenance for ${sessionId} (success=${event.success}).`,
       );
@@ -110,24 +159,31 @@ export function registerOpenClawHookBridge(api: HookApi): void {
   api.on(
     'before_compaction',
     async (_event: BeforeCompactionEvent, ctx: AgentHookContext) => {
-      const sessionId = resolveHookSessionId(ctx);
+      const identity = resolveCanonicalRuntimeIdentity(ctx as Record<string, unknown>);
+      writeRuntimeIdentityDiagnostic({
+        enabled: resolvedConfig.runtimeIdentityDebug,
+        memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+        lifecycle: 'hook:before_compaction',
+        resolution: identity,
+      });
+      const sessionId = identity.namespace.sessionId;
       if (!sessionId) {
         return;
       }
 
+      rememberRuntimeIdentityObservation({
+        namespace: identity.namespace,
+      });
       await adapter.flushMemory({
         sessionId,
         reason: 'compaction',
+        agentId: identity.namespace.agentId,
+        workspaceId: identity.namespace.workspaceId,
       });
       logger?.debug?.(`[${CONTEXT_ENGINE_PLUGIN_INFO.id}] flushed layered memory before compaction for ${sessionId}.`);
     },
     { priority: 50 },
   );
-}
-
-function resolveHookSessionId(ctx: AgentHookContext): string | undefined {
-  const candidate = ctx.sessionKey ?? ctx.agentId;
-  return candidate ? String(candidate) : undefined;
 }
 
 function normalizeHookMessages(messages: unknown[] | undefined): HookMessage[] {
@@ -155,7 +211,7 @@ async function syncHookMessages(
 
   await adapter.syncTranscript({
     sessionId,
-    entries: messages,
+    entries: messages.filter(shouldSyncRuntimeMessage),
   });
 }
 
@@ -186,8 +242,16 @@ function buildHookPrependContext(result: OpenClawAdapterAssembleResult): string 
 }
 
 function formatHookContextMessage(message: Record<string, unknown>): string | undefined {
-  const kind = typeof message.kind === 'string' ? message.kind : 'context';
+  const role = typeof message.role === 'string' ? message.role : undefined;
+  const kind = typeof message.kind === 'string' ? message.kind : role ?? 'context';
   const content = message.content;
+
+  if (role) {
+    const text = normalizeRuntimeContentToText(content);
+    if (text) {
+      return `- ${role}: ${truncateInline(text, 280)}`;
+    }
+  }
 
   if (content && typeof content === 'object' && !Array.isArray(content)) {
     const typedContent = content as {
@@ -224,15 +288,4 @@ function formatHookContextMessage(message: Record<string, unknown>): string | un
 
 function truncateInline(value: string, maxChars: number): string {
   return value.length <= maxChars ? value : `${value.slice(0, maxChars - 3)}...`;
-}
-
-function extractLatestUserText(messages: HookMessage[]): string | undefined {
-  const reversed = [...messages].reverse();
-  for (const message of reversed) {
-    if ((message.role === 'user' || message.type === 'user') && typeof message.content === 'string') {
-      return message.content;
-    }
-  }
-
-  return undefined;
 }

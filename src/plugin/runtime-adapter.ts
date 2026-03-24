@@ -22,18 +22,24 @@ export function getOrCreateRuntimeAdapter(input?: RuntimeConfigLike): OpenClawHy
         memoryWorkspaceRoot: config.memoryWorkspaceRoot,
         enableLayeredRead: config.enableLayeredRead,
         enableLayeredWrite: config.enableLayeredWrite,
+        enableQueryGate: config.enableQueryGate,
+        disableLongTermMemoryForConversationQueries: config.disableLongTermMemoryForConversationQueries,
         flushOnAfterTurn: config.flushOnAfterTurn,
         flushOnCompact: config.flushOnCompact,
         promoteOnMaintenance: config.promoteOnMaintenance,
+        runtimeIdentityDebug: config.runtimeIdentityDebug,
       })
     : new OpenClawHypergraphAdapter({
         store: getOrCreateStore(config.dbPath!),
         memoryWorkspaceRoot: config.memoryWorkspaceRoot,
         enableLayeredRead: config.enableLayeredRead,
         enableLayeredWrite: config.enableLayeredWrite,
+        enableQueryGate: config.enableQueryGate,
+        disableLongTermMemoryForConversationQueries: config.disableLongTermMemoryForConversationQueries,
         flushOnAfterTurn: config.flushOnAfterTurn,
         flushOnCompact: config.flushOnCompact,
         promoteOnMaintenance: config.promoteOnMaintenance,
+        runtimeIdentityDebug: config.runtimeIdentityDebug,
       });
 
   getAdapterCache().set(cacheKey, adapter);
@@ -54,9 +60,12 @@ function buildAdapterCacheKey(config: RuntimeAdapterConfig): string {
     memoryWorkspaceRoot: config.memoryWorkspaceRoot,
     enableLayeredRead: config.enableLayeredRead,
     enableLayeredWrite: config.enableLayeredWrite,
+    enableQueryGate: config.enableQueryGate,
+    disableLongTermMemoryForConversationQueries: config.disableLongTermMemoryForConversationQueries,
     flushOnAfterTurn: config.flushOnAfterTurn,
     flushOnCompact: config.flushOnCompact,
     promoteOnMaintenance: config.promoteOnMaintenance,
+    runtimeIdentityDebug: config.runtimeIdentityDebug,
   });
 }
 

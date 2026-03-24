@@ -1,17 +1,42 @@
 import {
   CONTEXT_ENGINE_PLUGIN_INFO,
   getOrCreateRuntimeAdapter,
+  normalizeContextEngineConfig,
   registerOpenClawHookBridge,
 } from './src/plugin/index.js';
+import {
+  extractLatestUserTextFromRuntimeMessages,
+  selectSafeRuntimeMessages,
+  shouldSyncRuntimeMessage,
+} from './src/plugin/runtime-message-utils.js';
+import {
+  rememberRuntimeIdentityObservation,
+  resolveCanonicalRuntimeIdentity,
+  writeRuntimeIdentityDiagnostic,
+} from './src/plugin/runtime-identity.js';
 
 type LegacyContextEngineApi = {
   registerContextEngine: (id: string, factory: (runtimeConfig?: unknown) => unknown | Promise<unknown>) => void;
   pluginConfig?: Record<string, unknown>;
+  config?: {
+    plugins?: {
+      slots?: {
+        contextEngine?: unknown;
+      };
+    };
+  };
 };
 
 type HookBridgeApi = {
   on: (hookName: string, handler: (...args: unknown[]) => unknown, opts?: { priority?: number }) => void;
   pluginConfig?: Record<string, unknown>;
+  config?: {
+    plugins?: {
+      slots?: {
+        contextEngine?: unknown;
+      };
+    };
+  };
   logger?: {
     info?: (message: string) => void;
     warn?: (message: string) => void;
@@ -21,22 +46,29 @@ type HookBridgeApi = {
 };
 
 export default function register(api: LegacyContextEngineApi | HookBridgeApi): void {
-  if (isLegacyContextEngineApi(api)) {
+  let registered = false;
+  const hasLegacyApi = isLegacyContextEngineApi(api);
+  const slotSelectedForPlugin = isContextEngineSlotSelected(api);
+
+  if (hasLegacyApi) {
     registerLegacyContextEngine(api);
-    return;
+    registered = true;
   }
 
-  if (isHookBridgeApi(api)) {
+  if (isHookBridgeApi(api) && (!hasLegacyApi || !slotSelectedForPlugin)) {
     registerOpenClawHookBridge(api);
-    return;
+    registered = true;
   }
 
-  throw new Error('Unsupported plugin registration API for hypergraph-context-engine.');
+  if (!registered) {
+    throw new Error('Unsupported plugin registration API for hypergraph-context-engine.');
+  }
 }
 
 function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
   api.registerContextEngine(CONTEXT_ENGINE_PLUGIN_INFO.id, (runtimeConfig?: unknown) => {
-    const adapter = getOrCreateRuntimeAdapter(mergeRuntimeConfig(api.pluginConfig, runtimeConfig));
+    const resolvedConfig = normalizeContextEngineConfig(mergeRuntimeConfig(api.pluginConfig, runtimeConfig));
+    const adapter = getOrCreateRuntimeAdapter(resolvedConfig);
 
     return {
       info: {
@@ -52,7 +84,25 @@ function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
         message: Record<string, unknown>;
         isHeartbeat?: boolean;
       }) {
-        const runtimeSessionId = getRuntimeSessionId(params);
+        const identity = resolveCanonicalRuntimeIdentity(params as Record<string, unknown>);
+        writeRuntimeIdentityDiagnostic({
+          enabled: resolvedConfig.runtimeIdentityDebug,
+          memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+          lifecycle: 'ingest',
+          resolution: identity,
+        });
+        const runtimeSessionId = identity.namespace.sessionId;
+        if (!runtimeSessionId) {
+          return { ingested: false };
+        }
+        if (!shouldSyncRuntimeMessage(params.message ?? {})) {
+          return { ingested: false };
+        }
+        rememberRuntimeIdentityObservation({
+          namespace: identity.namespace,
+          messages: [params.message],
+        });
+
         await adapter.ingest({
           sessionId: runtimeSessionId,
           entry: {
@@ -71,17 +121,32 @@ function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
         messages: Array<Record<string, unknown>>;
         isHeartbeat?: boolean;
       }) {
-        const runtimeSessionId = getRuntimeSessionId(params);
+        const identity = resolveCanonicalRuntimeIdentity(params as Record<string, unknown>);
+        writeRuntimeIdentityDiagnostic({
+          enabled: resolvedConfig.runtimeIdentityDebug,
+          memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+          lifecycle: 'ingestBatch',
+          resolution: identity,
+        });
+        const runtimeSessionId = identity.namespace.sessionId;
+        if (!runtimeSessionId) {
+          return { ingestedCount: 0 };
+        }
+        const filteredMessages = (params.messages ?? []).filter(shouldSyncRuntimeMessage);
+        rememberRuntimeIdentityObservation({
+          namespace: identity.namespace,
+          messages: filteredMessages,
+        });
         await adapter.ingestMany({
           sessionId: runtimeSessionId,
-          entries: (params.messages ?? []).map((message) => ({
+          entries: filteredMessages.map((message) => ({
             ...message,
             id: String((message as { id?: unknown })?.id ?? crypto.randomUUID()),
             createdAt: String((message as { createdAt?: unknown })?.createdAt ?? new Date().toISOString()),
           })),
         });
 
-        return { ingestedCount: params.messages?.length ?? 0 };
+        return { ingestedCount: filteredMessages.length };
       },
 
       async assemble(params: {
@@ -90,18 +155,42 @@ function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
         messages: Array<Record<string, unknown>>;
         tokenBudget?: number;
       }) {
-        const runtimeSessionId = getRuntimeSessionId(params);
-        await syncRuntimeMessages(adapter, runtimeSessionId, params.messages ?? []);
-        const currentTurnText = extractLatestUserText(params.messages ?? []);
+        const identity = resolveCanonicalRuntimeIdentity(params as Record<string, unknown>);
+        writeRuntimeIdentityDiagnostic({
+          enabled: resolvedConfig.runtimeIdentityDebug,
+          memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+          lifecycle: 'assemble',
+          resolution: identity,
+        });
+        const runtimeSessionId = identity.namespace.sessionId;
+        if (!runtimeSessionId) {
+          return {
+            messages: [],
+            estimatedTokens: 0,
+            systemPromptAddition: 'Hypergraph adapter fallback: missing runtime session identity.',
+          };
+        }
+        const runtimeMessages = (params.messages ?? []).filter(shouldSyncRuntimeMessage);
+        rememberRuntimeIdentityObservation({
+          namespace: identity.namespace,
+          messages: runtimeMessages,
+        });
+        await syncRuntimeMessages(adapter, runtimeSessionId, runtimeMessages);
+        const currentTurnText = extractLatestUserTextFromRuntimeMessages(runtimeMessages);
         const result = await adapter.assemble({
           sessionId: runtimeSessionId,
           currentTurnText,
           tokenBudget: params.tokenBudget ?? 4000,
+          agentId: identity.namespace.agentId,
+          workspaceId: identity.namespace.workspaceId,
         });
+        const slotMessages = runtimeMessages.length > 0
+          ? selectSafeRuntimeMessages(runtimeMessages, currentTurnText)
+          : result.messages;
 
         return {
-          messages: result.messages as Array<Record<string, unknown>>,
-          estimatedTokens: estimateTokens(result.messages),
+          messages: slotMessages as Array<Record<string, unknown>>,
+          estimatedTokens: estimateTokens(slotMessages),
           systemPromptAddition: result.systemPromptAddition,
         };
       },
@@ -117,8 +206,28 @@ function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
         customInstructions?: string;
         runtimeContext?: Record<string, unknown>;
       }) {
-        const runtimeSessionId = getRuntimeSessionId(params);
-        const result = await adapter.compact({ sessionId: runtimeSessionId });
+        const identity = resolveCanonicalRuntimeIdentity(params as Record<string, unknown>);
+        writeRuntimeIdentityDiagnostic({
+          enabled: resolvedConfig.runtimeIdentityDebug,
+          memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+          lifecycle: 'compact',
+          resolution: identity,
+        });
+        const runtimeSessionId = identity.namespace.sessionId;
+        if (!runtimeSessionId) {
+          return {
+            ok: true,
+            compacted: false,
+          };
+        }
+        rememberRuntimeIdentityObservation({
+          namespace: identity.namespace,
+        });
+        const result = await adapter.compact({
+          sessionId: runtimeSessionId,
+          agentId: identity.namespace.agentId,
+          workspaceId: identity.namespace.workspaceId,
+        });
         return {
           ok: true,
           compacted: Boolean(result.summaryNodeId),
@@ -145,26 +254,30 @@ function registerLegacyContextEngine(api: LegacyContextEngineApi): void {
         tokenBudget?: number;
         runtimeContext?: Record<string, unknown>;
       }) {
-        const runtimeSessionId = getRuntimeSessionId(params);
+        const identity = resolveCanonicalRuntimeIdentity(params as Record<string, unknown>);
+        writeRuntimeIdentityDiagnostic({
+          enabled: resolvedConfig.runtimeIdentityDebug,
+          memoryWorkspaceRoot: resolvedConfig.memoryWorkspaceRoot,
+          lifecycle: 'afterTurn',
+          resolution: identity,
+        });
+        const runtimeSessionId = identity.namespace.sessionId;
+        if (!runtimeSessionId) {
+          return;
+        }
+        rememberRuntimeIdentityObservation({
+          namespace: identity.namespace,
+          messages: params.messages ?? [],
+        });
         await syncRuntimeMessages(adapter, runtimeSessionId, params.messages ?? []);
-        await adapter.afterTurn({ sessionId: runtimeSessionId });
+        await adapter.afterTurn({
+          sessionId: runtimeSessionId,
+          agentId: identity.namespace.agentId,
+          workspaceId: identity.namespace.workspaceId,
+        });
       },
     };
   });
-}
-
-function getRuntimeSessionId(params: { sessionId: string; sessionKey?: string }): string {
-  return String(params.sessionKey ?? params.sessionId);
-}
-
-function extractLatestUserText(messages: Array<Record<string, unknown>>): string | undefined {
-  const reversed = [...messages].reverse();
-  for (const message of reversed) {
-    if ((message.role === 'user' || message.type === 'user') && typeof message.content === 'string') {
-      return message.content;
-    }
-  }
-  return undefined;
 }
 
 function estimateTokens(messages: Array<Record<string, unknown>>): number {
@@ -183,11 +296,13 @@ async function syncRuntimeMessages(
 
   await adapter.syncTranscript({
     sessionId,
-    entries: messages.map((message) => ({
-      ...message,
-      id: String((message as { id?: unknown })?.id ?? crypto.randomUUID()),
-      createdAt: String((message as { createdAt?: unknown })?.createdAt ?? new Date().toISOString()),
-    })),
+    entries: messages
+      .filter(shouldSyncRuntimeMessage)
+      .map((message) => ({
+        ...message,
+        id: String((message as { id?: unknown })?.id ?? crypto.randomUUID()),
+        createdAt: String((message as { createdAt?: unknown })?.createdAt ?? new Date().toISOString()),
+      })),
   });
 }
 
@@ -197,6 +312,11 @@ function isLegacyContextEngineApi(value: LegacyContextEngineApi | HookBridgeApi)
 
 function isHookBridgeApi(value: LegacyContextEngineApi | HookBridgeApi): value is HookBridgeApi {
   return typeof (value as HookBridgeApi)?.on === 'function';
+}
+
+function isContextEngineSlotSelected(value: LegacyContextEngineApi | HookBridgeApi): boolean {
+  const configuredSlot = value.config?.plugins?.slots?.contextEngine;
+  return typeof configuredSlot === 'string' && configuredSlot.trim() === CONTEXT_ENGINE_PLUGIN_INFO.id;
 }
 
 function mergeRuntimeConfig(

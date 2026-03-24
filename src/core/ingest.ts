@@ -1,4 +1,5 @@
 import type { BaseNode, GraphEdge } from '../../schemas/types.js';
+import { looksLikeRecallIntent } from './dialogue-cues.js';
 import type { TranscriptEntryLike } from './engine.js';
 import { materializeTaskState } from './task-state.js';
 
@@ -687,12 +688,7 @@ function matchesOpenLoopPattern(text: string): boolean {
 }
 
 function looksLikeMemoryRecallMessage(text: string): boolean {
-  const normalized = stripRuntimeScaffolding(text).toLowerCase();
-  return /\bwhat is the current task and the next step\b/.test(normalized)
-    || /\basked you to remember\b/.test(normalized)
-    || /\bfrom today'?s memory\b/.test(normalized)
-    || (/\bcurrent task:\b/.test(normalized) && /\bnext step:\b/.test(normalized))
-    || /\bthe context was that\b/.test(normalized);
+  return looksLikeRecallIntent(stripRuntimeScaffolding(text));
 }
 
 function looksLikePriorityList(text: string): boolean {

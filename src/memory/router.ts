@@ -3,9 +3,16 @@ import type {
   FlushReason,
   MemoryChunkPayload,
   MemoryLayer,
+  MemoryNamespaceContext,
   MemoryScope,
   TaskState,
 } from '../../schemas/types.js';
+import {
+  extractExplicitNextStep,
+  extractExplicitTaskDefinition,
+  looksLikeLowSignalStateNoise,
+  looksLikeRecallIntent,
+} from '../core/dialogue-cues.js';
 
 export interface LayeredMemoryCandidate {
   title: string;
@@ -30,6 +37,9 @@ export interface NowDocumentState {
   blockers: string[];
   nextSteps: string[];
   updatedAt: string;
+  lastSessionId?: string;
+  lastAgentId?: string;
+  lastWorkspaceId?: string;
 }
 
 export interface LayeredMemoryFlushPlan {
@@ -38,8 +48,7 @@ export interface LayeredMemoryFlushPlan {
   dailyAudit: string[];
 }
 
-export interface RouteLayeredMemoryParams {
-  sessionId: string;
+export interface RouteLayeredMemoryParams extends MemoryNamespaceContext {
   taskState: TaskState;
   nodes: BaseNode[];
   existingEntries?: MemoryChunkPayload[];
@@ -63,10 +72,13 @@ export function routeLayeredMemory(params: RouteLayeredMemoryParams): LayeredMem
       .filter((entry) => typeof entry.dedupeKey === 'string')
       .map((entry) => [entry.dedupeKey, entry]),
   );
-  const candidates = collectCandidates(params.taskState, params.nodes, existingByKey);
+  const candidates = collectCandidates(params.taskState, params.nodes, existingByKey, params);
   const entries = candidates.map((candidate) => {
     const routed = routeMemoryCandidate(candidate);
-    const existing = existingByKey.get(routed.dedupeKey);
+    const dedupeKey = routed.layer === 'hot'
+      ? qualifyHotDedupeKey(routed.category ?? 'current-task', params)
+      : routed.dedupeKey;
+    const existing = existingByKey.get(dedupeKey);
     const recurrence = Math.max(routed.recurrence, (existing?.recurrence ?? 0) + 1);
     const connectivity = Math.max(routed.connectivity, existing?.connectivity ?? 0);
     const hitCount = (existing?.hitCount ?? 0) + 1;
@@ -74,6 +86,7 @@ export function routeLayeredMemory(params: RouteLayeredMemoryParams): LayeredMem
 
     return {
       ...routed,
+      dedupeKey,
       updatedAt: now,
       firstSeenAt: existing?.firstSeenAt ?? now,
       hitCount,
@@ -81,16 +94,25 @@ export function routeLayeredMemory(params: RouteLayeredMemoryParams): LayeredMem
       recurrence,
       connectivity,
       lastSessionId: params.sessionId,
+      lastAgentId: params.agentId,
+      lastWorkspaceId: params.workspaceId,
       relativePath: resolveMemoryRelativePath({
         layer: routed.layer,
         category: routed.category,
-        dedupeKey: routed.dedupeKey,
+        dedupeKey,
+        lastSessionId: params.sessionId,
+        lastAgentId: params.agentId,
+        lastWorkspaceId: params.workspaceId,
       }),
     };
   });
 
   return {
-    nowState: buildNowState(params.taskState, now),
+    nowState: buildNowState(params.taskState, params.nodes, existingByKey, now, {
+      sessionId: params.sessionId,
+      agentId: params.agentId,
+      workspaceId: params.workspaceId,
+    }),
     entries,
     dailyAudit: buildDailyAudit(params, entries),
   };
@@ -160,8 +182,17 @@ export function classifyMemoryLayer(candidate: LayeredMemoryCandidate): MemoryLa
   return 'warm';
 }
 
-export function resolveMemoryRelativePath(entry: Pick<RoutedLayeredMemoryEntry, 'layer' | 'category' | 'dedupeKey'>): string {
+export function resolveMemoryRelativePath(
+  entry: Pick<
+    RoutedLayeredMemoryEntry,
+    'layer' | 'category' | 'dedupeKey' | 'lastSessionId' | 'lastAgentId' | 'lastWorkspaceId'
+  >,
+): string {
   if (entry.layer === 'hot') {
+    if (entry.lastSessionId || entry.lastAgentId || entry.lastWorkspaceId) {
+      return `memory/hot/${slugify(entry.dedupeKey)}.md`;
+    }
+
     if (entry.category === 'current-project') {
       return 'memory/hot/current-project.md';
     }
@@ -195,16 +226,18 @@ function collectCandidates(
   taskState: TaskState,
   nodes: BaseNode[],
   existingByKey: Map<string, MemoryChunkPayload>,
+  namespace: MemoryNamespaceContext,
 ): LayeredMemoryCandidate[] {
   const candidates: LayeredMemoryCandidate[] = [];
+  const currentTaskSummary = selectCurrentTaskSummary(taskState, existingByKey, nodes, namespace);
   const topDecision = taskState.activeDecisions[0];
   const topConstraint = taskState.constraints[0];
   const topToolFact = taskState.toolFacts[0];
 
-  if (taskState.intent || taskState.activeDecisions.length || taskState.openLoops.length) {
+  if (currentTaskSummary || taskState.activeDecisions.length || taskState.openLoops.length) {
     candidates.push({
       title: 'Current Task State',
-      summary: taskState.intent ?? topDecision ?? taskState.openLoops[0] ?? 'Current task state',
+      summary: currentTaskSummary ?? topDecision ?? taskState.openLoops[0] ?? 'Current task state',
       details: [
         ...taskState.activeDecisions.slice(0, 3).map((value) => `Active decision: ${value}`),
         ...taskState.openLoops.slice(0, 3).map((value) => `Open loop: ${value}`),
@@ -285,13 +318,56 @@ function collectCandidates(
   return candidates;
 }
 
-function buildNowState(taskState: TaskState, now: string): NowDocumentState {
+function buildNowState(
+  taskState: TaskState,
+  nodes: BaseNode[],
+  existingByKey: Map<string, MemoryChunkPayload>,
+  now: string,
+  namespace: MemoryNamespaceContext,
+): NowDocumentState {
+  const explicitUserTask = findLatestExplicitTaskDefinition(nodes, 'user');
+  const explicitTask = explicitUserTask ?? findLatestExplicitTaskDefinition(nodes);
+  const explicitUserNextStep = findLatestExplicitNextStep(nodes, 'user');
+  const explicitNextStep = explicitUserNextStep ?? findLatestExplicitNextStep(nodes);
+  const currentTask = explicitUserTask
+    ?? explicitTask
+    ?? (looksLikeRecallIntent(taskState.intent)
+      ? selectCurrentTaskSummary(taskState, existingByKey, nodes, namespace) ?? null
+      : taskState.intent);
+  const blockers = uniqueNowItems(taskState.openLoops)
+    .filter((value) => value !== explicitNextStep)
+    .filter((value) => !looksLikeNonActionableStatus(value))
+    .filter((value) => !matchesNowText(value, currentTask))
+    .slice(0, 4);
+  const nextSteps = uniqueNowItems([
+    explicitUserNextStep,
+    explicitNextStep,
+    ...taskState.priorityBacklog,
+    ...taskState.openLoops,
+  ])
+    .filter((value) => !looksLikeNonActionableStatus(value))
+    .filter((value) => !matchesNowText(value, currentTask))
+    .slice(0, 4);
+  const currentPlan = uniqueNowItems(
+    taskState.activeDecisions
+      .map((value) => compactNowSummary(value, 'plan'))
+      .filter((value): value is string => Boolean(value)),
+  )
+    .filter((value) => !looksLikeNonActionableStatus(value))
+    .filter((value) => !matchesNowText(value, currentTask))
+    .filter((value) => !nextSteps.some((nextStep) => matchesNowText(value, nextStep)))
+    .filter((value) => !blockers.some((blocker) => matchesNowText(value, blocker)))
+    .slice(0, 4);
+
   return {
-    currentTask: taskState.intent,
-    currentPlan: taskState.activeDecisions.slice(0, 4),
-    blockers: taskState.openLoops.slice(0, 4),
-    nextSteps: taskState.priorityBacklog.slice(0, 4),
+    currentTask,
+    currentPlan,
+    blockers,
+    nextSteps,
     updatedAt: now,
+    lastSessionId: namespace.sessionId,
+    lastAgentId: namespace.agentId,
+    lastWorkspaceId: namespace.workspaceId,
   };
 }
 
@@ -301,10 +377,12 @@ function buildDailyAudit(
 ): string[] {
   return [
     `Flush reason: ${params.reason}`,
+    params.agentId ? `Agent: ${params.agentId}` : undefined,
+    params.workspaceId ? `Workspace: ${params.workspaceId}` : undefined,
     `Intent: ${params.taskState.intent ?? '(unknown)'}`,
     `Wrote layered entries: ${entries.map((entry) => `${entry.layer}:${entry.title}`).join(' | ') || '(none)'}`,
     params.taskState.openLoops.length ? `Open loops: ${params.taskState.openLoops.join(' | ')}` : 'Open loops: none',
-  ];
+  ].filter((line): line is string => Boolean(line));
 }
 
 function describeRouteReason(candidate: LayeredMemoryCandidate, layer: MemoryLayer): string {
@@ -364,6 +442,17 @@ function createDedupeKey(category: string, title: string, summary: string): stri
   return slugify(`${category}-${semanticKey}`.slice(0, 140));
 }
 
+function qualifyHotDedupeKey(category: string, namespace: MemoryNamespaceContext): string {
+  const segments = [
+    `hot-${slugify(category)}`,
+    namespace.workspaceId ? `workspace-${slugify(namespace.workspaceId)}` : undefined,
+    namespace.agentId ? `agent-${slugify(namespace.agentId)}` : undefined,
+    namespace.sessionId ? `session-${slugify(namespace.sessionId)}` : undefined,
+  ].filter((value): value is string => Boolean(value));
+
+  return segments.join('--');
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -416,4 +505,189 @@ function normalizeMemoryDedupeText(value: string): string {
     .filter((token) => token.length >= 3)
     .slice(0, 12)
     .join(' ');
+}
+
+function selectCurrentTaskSummary(
+  taskState: TaskState,
+  existingByKey: Map<string, MemoryChunkPayload>,
+  nodes: BaseNode[],
+  namespace?: MemoryNamespaceContext,
+): string | undefined {
+  const explicitTask = findLatestExplicitTaskDefinition(nodes);
+  if (explicitTask) {
+    return explicitTask;
+  }
+
+  if (taskState.intent && !looksLikeRecallIntent(taskState.intent)) {
+    return taskState.intent;
+  }
+
+  const existingCurrentTask = [...existingByKey.values()]
+    .filter((entry) => entry.layer === 'hot' && entry.category === 'current-task')
+    .sort((left, right) =>
+      namespaceAffinityScore(right, namespace) - namespaceAffinityScore(left, namespace)
+      || right.updatedAt.localeCompare(left.updatedAt)
+    )[0];
+
+  return existingCurrentTask?.summary
+    ?? taskState.activeDecisions[0]
+    ?? taskState.openLoops[0]
+    ?? undefined;
+}
+
+function namespaceAffinityScore(
+  entry: MemoryChunkPayload,
+  namespace: MemoryNamespaceContext | undefined,
+): number {
+  if (!namespace) {
+    return 0;
+  }
+
+  if (namespace.sessionId && entry.lastSessionId === namespace.sessionId) {
+    return 3;
+  }
+
+  if (namespace.agentId && entry.lastAgentId === namespace.agentId) {
+    return 2;
+  }
+
+  if (namespace.workspaceId && entry.lastWorkspaceId === namespace.workspaceId) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function findLatestExplicitTaskDefinition(nodes: BaseNode[], role?: 'user' | 'assistant'): string | undefined {
+  return [...nodes]
+    .reverse()
+    .filter((node) => node.kind === 'message' || node.kind === 'intent')
+    .filter((node) => !role || readNodeRole(node) === role)
+    .map((node) => readNodeText(node))
+    .map((value) => extractExplicitTaskDefinition(value))
+    .find((value): value is string => Boolean(value));
+}
+
+function findLatestExplicitNextStep(nodes: BaseNode[], role?: 'user' | 'assistant'): string | undefined {
+  return [...nodes]
+    .reverse()
+    .filter((node) => node.kind === 'message' || node.kind === 'intent')
+    .filter((node) => !role || readNodeRole(node) === role)
+    .map((node) => readNodeText(node))
+    .map((value) => extractExplicitNextStep(value))
+    .find((value): value is string => Boolean(value));
+}
+
+function readNodeText(node: BaseNode): string | undefined {
+  const payload = node.payload as { text?: unknown; intent?: unknown; question?: unknown; summary?: unknown };
+  return [
+    payload.text,
+    payload.intent,
+    payload.question,
+    payload.summary,
+  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+}
+
+function readNodeRole(node: BaseNode): 'user' | 'assistant' | undefined {
+  const payload = node.payload as { role?: unknown };
+  const role = typeof payload.role === 'string' ? payload.role.toLowerCase() : undefined;
+  if (role === 'user' || role === 'assistant') {
+    return role;
+  }
+
+  return node.kind === 'intent' ? 'user' : undefined;
+}
+
+function looksLikeNonActionableStatus(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return /\bno active next step\b/.test(normalized)
+    || /\btask is done\b/.test(normalized)
+    || /\bno remaining issues\b/.test(normalized)
+    || /\bstabilization is complete\b/.test(normalized);
+}
+
+function compactNowSummary(value: string | undefined, kind: 'plan' | 'action'): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value
+    .replace(/^\[[^[\]]+\]\s*/u, '')
+    .replace(/^<final>\s*/i, '')
+    .replace(/\*\*/g, '')
+    .replace(/`+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  const explicitTask = extractExplicitTaskDefinition(normalized);
+  if (explicitTask) {
+    return kind === 'plan' ? undefined : explicitTask;
+  }
+
+  const explicitNextStep = extractExplicitNextStep(normalized);
+  if (explicitNextStep) {
+    return explicitNextStep;
+  }
+
+  const stripped = normalized
+    .replace(/^(done|verified|verification complete|update(?:d)?|ready)\.?\s*/i, '')
+    .split(/\s+(?:verification results|what was stabilized|files changed|fallback behavior change|problem|solution)\b/i)[0]
+    .split(/\s+-\s+/)[0]
+    .trim();
+  const sentence = stripped
+    .split(/(?<=[.!?。！？])\s+/u)[0]
+    ?.replace(/[.!?。！？]+$/u, '')
+    .trim();
+
+  if (!sentence || sentence.length < 6) {
+    return undefined;
+  }
+
+  if (looksLikeLowSignalStateNoise(sentence)) {
+    return undefined;
+  }
+
+  return sentence.length > 140 ? `${sentence.slice(0, 137).trim()}...` : sentence;
+}
+
+function uniqueNowItems(values: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of values) {
+    const compacted = compactNowSummary(raw ?? undefined, 'action');
+    if (!compacted) {
+      continue;
+    }
+
+    const key = normalizeNowKey(compacted);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    out.push(compacted);
+  }
+
+  return out;
+}
+
+function normalizeNowKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function matchesNowText(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) {
+    return false;
+  }
+
+  return normalizeNowKey(left) === normalizeNowKey(right);
 }

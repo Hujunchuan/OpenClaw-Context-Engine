@@ -11,7 +11,7 @@ The repository is now intentionally split into three layers:
 - `src/memory/`
   Layered Markdown memory: hot/warm/cold routing, workspace reads/writes, lifecycle policy, and transient memory indexing.
 - `src/plugin/`
-  OpenClaw-facing glue: shared config normalization, runtime adapter caching, and plugin registration boundaries.
+  OpenClaw-facing glue: shared config normalization, runtime identity resolution, runtime adapter caching, and plugin registration boundaries.
 
 Tests follow the same split:
 
@@ -82,6 +82,13 @@ What this plugin changes:
 - Markdown workspace stores layered memory facts such as `NOW.md`, `MEMORY.md`, and `memory/hot|warm|cold|archive|YYYY-MM-DD.md`.
 - Assemble fuses session state with recalled layered memory at read time.
 - Layered `memory_chunk` nodes are no longer persisted back into SQLite session snapshots.
+- Runtime identity is normalized before ingest / assemble / compact / afterTurn, so explicit `sessionId` wins over generic runtime keys.
+- Layered memory is namespace-aware:
+  - writes carry `sessionId`, `agentId`, and `workspaceId`
+  - retrieval prefers `session > agent > workspace > global`
+- Query gate is enabled by default:
+  - conversation-style recall uses transcript + task state + session-hot memory
+  - greeting / heartbeat / simple ack turns skip long-term memory recall
 
 ## Quick start
 
@@ -155,6 +162,12 @@ This repository exposes a `context-engine` plugin via `openclaw.plugin.json`.
 
 Important: this is currently a context-engine plugin with layered memory support, not a standalone `memory` slot plugin.
 
+The current recommended integration mode is:
+
+- set `plugins.slots.contextEngine = "hypergraph-context-engine"`
+- let the plugin own context assembly through the slot
+- keep the hook bridge only as a fallback when OpenClaw runtime surfaces hooks but not the legacy registration API
+
 ### Install into OpenClaw
 
 Install this repository as a local plugin:
@@ -179,8 +192,11 @@ Then enable it and switch the `contextEngine` slot to this plugin:
           memoryWorkspaceRoot: "C:/tmp/openclaw-memory",
           enableLayeredRead: true,
           enableLayeredWrite: true,
+          enableQueryGate: true,
+          disableLongTermMemoryForConversationQueries: true,
           flushOnAfterTurn: true,
           flushOnCompact: true,
+          runtimeIdentityDebug: false,
         },
       },
     },
@@ -201,6 +217,37 @@ openclaw plugins list
 openclaw plugins inspect hypergraph-context-engine
 ```
 
+### Uninstall and roll back
+
+To uninstall the plugin:
+
+```powershell
+openclaw plugins uninstall hypergraph-context-engine
+```
+
+If you want to switch OpenClaw back to the default context engine, update config like this:
+
+```ts
+{
+  plugins: {
+    slots: {
+      contextEngine: "legacy",
+    },
+    entries: {
+      "hypergraph-context-engine": {
+        enabled: false,
+      },
+    },
+  },
+}
+```
+
+Then restart OpenClaw Gateway:
+
+```powershell
+openclaw gateway restart
+```
+
 Important notes:
 
 - This plugin belongs in `plugins.slots.contextEngine`, not `plugins.slots.memory`.
@@ -214,9 +261,19 @@ Config fields:
 - `memoryWorkspaceRoot`
 - `enableLayeredRead`
 - `enableLayeredWrite`
+- `enableQueryGate`
+- `disableLongTermMemoryForConversationQueries`
 - `flushOnAfterTurn`
 - `flushOnCompact`
 - `promoteOnMaintenance`
+- `runtimeIdentityDebug`
+
+Retrieval defaults:
+
+- write namespace: `sessionId`, `agentId`, `workspaceId`
+- retrieval priority: `session > agent > workspace > global`
+- conversation queries such as `previous message`, `first message`, `current task`, `next step`, `continue` stay session-first
+- long-term warm/cold memory still participates for project or knowledge queries
 
 Environment fallbacks:
 
@@ -234,11 +291,14 @@ The following checks are currently passing:
 - `npm run check`
 - `npm run plugin:check`
 - `npm run memory:demo`
+- `npm run runtime:validate`
 
 There is also an additional smoke validation path confirming:
 
 - layered memory is recalled during assemble
 - `memory_chunk` nodes are not persisted into SQLite session snapshots
+- explicit session ids survive real OpenClaw slot-mode runs on the Ubuntu test machine
+- cross-session `current task / next step` recall stays isolated between explicit sessions
 
 ## Next likely step
 

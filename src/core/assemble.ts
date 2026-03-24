@@ -1,6 +1,13 @@
 import type { AssembleBucket, BaseNode, MemoryChunkPayload, RetrievalCandidate, SummaryNodePayload, TaskState } from '../../schemas/types.js';
 import type { AssembleInput, AssembleOutput } from './engine.js';
 import type { SessionSnapshot } from './ingest.js';
+import {
+  extractExplicitNextStep,
+  extractExplicitTaskDefinition,
+  isExplicitTaskDefinition,
+  looksLikeConversationRecall as looksLikeConversationRecallCue,
+  looksLikeTaskContinuationQuery,
+} from './dialogue-cues.js';
 import { retrieveRelevantNodes } from './retriever.js';
 import { createEmptyTaskState, materializeTaskState } from './task-state.js';
 
@@ -59,9 +66,14 @@ export function assembleContext(
     taskState,
     currentTurnText: input.currentTurnText,
     limit: Math.max(8, Math.ceil(snapshot.nodes.length * 0.6)),
+    memoryNamespace: {
+      sessionId: input.sessionId,
+      agentId: input.agentId,
+      workspaceId: input.workspaceId,
+    },
   });
   const candidates = retrieval.candidates;
-  const buckets = fillBuckets(candidates, snapshot.nodes, input.tokenBudget);
+  const buckets = fillBuckets(candidates, snapshot.nodes, input.tokenBudget, input.currentTurnText);
   const selectedNodeIds = expandSelectedNodeIds(buckets, snapshot.nodes);
   const retrievalSummary = candidates.slice(0, 5).map((candidate) => {
     const node = snapshot.nodes.find((item) => item.id === candidate.nodeId);
@@ -90,7 +102,7 @@ export function assembleContext(
 
   return {
     messages: selectedMessages,
-    systemPromptAddition: buildSystemPrompt(taskState, buckets),
+    systemPromptAddition: buildSystemPrompt(taskState, buckets, snapshot.nodes, selectedNodeIds, input.currentTurnText),
     taskState,
     buckets,
     candidates,
@@ -126,11 +138,12 @@ function fillBuckets(
   candidates: RetrievalCandidate[],
   nodes: BaseNode[],
   tokenBudget: number,
+  currentTurnText?: string,
 ): AssembleBucket[] {
   const buckets = createBuckets(tokenBudget);
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
 
-  seedBucketsWithTopCandidates(buckets, candidates, nodeMap);
+  seedBucketsWithTopCandidates(buckets, candidates, nodeMap, currentTurnText);
 
   for (const candidate of candidates) {
     const node = nodeMap.get(candidate.nodeId);
@@ -163,8 +176,14 @@ function seedBucketsWithTopCandidates(
   buckets: AssembleBucket[],
   candidates: RetrievalCandidate[],
   nodeMap: Map<string, BaseNode>,
+  currentTurnText?: string,
 ): void {
   for (const bucket of buckets) {
+    if (bucket.name === 'recent_dialogue') {
+      seedRecentDialogueBucket(bucket, nodeMap, currentTurnText);
+      continue;
+    }
+
     const topCandidateForBucket = selectSeedCandidateForBucket(bucket.name, candidates, nodeMap);
 
     if (!topCandidateForBucket) {
@@ -179,6 +198,39 @@ function seedBucketsWithTopCandidates(
     if (estimateNodeTokens(node) <= bucket.budgetTokens || node.kind === 'summary' || bucket.nodeIds.length === 0) {
       bucket.nodeIds.push(node.id);
     }
+  }
+}
+
+function seedRecentDialogueBucket(
+  bucket: AssembleBucket,
+  nodeMap: Map<string, BaseNode>,
+  currentTurnText?: string,
+): void {
+  const recallConversation = looksLikeConversationRecall(currentTurnText);
+  const latestDialogueNodes = [...nodeMap.values()]
+    .filter((node) => node.kind === 'message')
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+
+  const candidates = latestDialogueNodes.slice(0, recallConversation ? 6 : 3);
+  const earliestUserMessage = recallConversation && /\bfirst message\b/i.test(currentTurnText ?? '')
+    ? [...latestDialogueNodes]
+        .reverse()
+        .find((node) => ((node.payload as { role?: unknown }).role === 'user'))
+    : undefined;
+
+  if (earliestUserMessage && !candidates.some((node) => node.id === earliestUserMessage.id)) {
+    candidates.push(earliestUserMessage);
+  }
+
+  let usedTokens = 0;
+  for (const node of candidates.sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+    const estimatedTokens = estimateNodeTokens(node);
+    if (usedTokens + estimatedTokens > bucket.budgetTokens && bucket.nodeIds.length > 0) {
+      continue;
+    }
+
+    bucket.nodeIds.push(node.id);
+    usedTokens += estimatedTokens;
   }
 }
 
@@ -228,11 +280,19 @@ function createBuckets(tokenBudget: number): AssembleBucket[] {
   }));
 }
 
-function buildSystemPrompt(taskState: TaskState, buckets: AssembleBucket[]): string {
+function buildSystemPrompt(
+  taskState: TaskState,
+  buckets: AssembleBucket[],
+  nodes: BaseNode[],
+  selectedNodeIds: Set<string>,
+  currentTurnText?: string,
+): string {
   const bucketSummary = buckets
     .filter((bucket) => bucket.nodeIds.length > 0)
     .map((bucket) => `${bucket.name}:${bucket.nodeIds.length}`)
     .join(', ');
+  const dialogueRecallHints = buildDialogueRecallHints(nodes, selectedNodeIds, currentTurnText);
+  const continuationHints = buildContinuationHints(nodes, selectedNodeIds, currentTurnText);
 
   return [
     'HypergraphContextEngine assembled task-state-guided context.',
@@ -246,9 +306,101 @@ function buildSystemPrompt(taskState: TaskState, buckets: AssembleBucket[]): str
     taskState.openLoops.length ? `Open loops: ${taskState.openLoops.join(' | ')}` : undefined,
     taskState.resolvedOpenLoops.length ? `Resolved loops: ${taskState.resolvedOpenLoops.join(' | ')}` : undefined,
     bucketSummary ? `Buckets: ${bucketSummary}` : undefined,
+    ...dialogueRecallHints,
+    ...continuationHints,
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+function buildDialogueRecallHints(
+  nodes: BaseNode[],
+  selectedNodeIds: Set<string>,
+  currentTurnText?: string,
+): string[] {
+  if (!looksLikeConversationRecall(currentTurnText)) {
+    return [];
+  }
+
+  const selectedDialogueNodes = nodes
+    .filter((node) => selectedNodeIds.has(node.id) && node.kind === 'message')
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const userDialogue = selectedDialogueNodes.filter((node) => (node.payload as { role?: unknown }).role === 'user');
+  const hints: string[] = [];
+  const previousUserMessage = userDialogue.at(-2);
+  const firstUserMessage = userDialogue[0];
+
+  if (previousUserMessage) {
+    const text = readMessageText(previousUserMessage);
+    if (text) {
+      hints.push(`Immediate previous user message: ${text}`);
+    }
+  }
+
+  if (/\bfirst message\b/i.test(currentTurnText ?? '') && firstUserMessage) {
+    const text = readMessageText(firstUserMessage);
+    if (text) {
+      hints.push(`First user message in this session: ${text}`);
+    }
+  }
+
+  return hints;
+}
+
+function buildContinuationHints(
+  nodes: BaseNode[],
+  selectedNodeIds: Set<string>,
+  currentTurnText?: string,
+): string[] {
+  if (!looksLikeTaskContinuationQuery(currentTurnText)) {
+    return [];
+  }
+
+  const selectedDialogueNodes = nodes
+    .filter((node) => selectedNodeIds.has(node.id) && node.kind === 'message')
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const userDialogue = selectedDialogueNodes.filter((node) => (node.payload as { role?: unknown }).role === 'user');
+  const assistantDialogue = selectedDialogueNodes.filter((node) => (node.payload as { role?: unknown }).role === 'assistant');
+  const latestTaskDefinition = [...userDialogue]
+    .reverse()
+    .find((node) => {
+      const text = readMessageText(node);
+      return isExplicitTaskDefinition(text) || (!looksLikeConversationRecall(text) && !looksLikeTaskContinuationQuery(text));
+    });
+  const latestUserNextStep = [...userDialogue]
+    .reverse()
+    .map((node) => extractExplicitNextStep(readMessageText(node)))
+    .find((value): value is string => Boolean(value));
+  const latestAssistantCommitment = [...assistantDialogue]
+    .reverse()
+    .find((node) => looksLikeAssistantCommitment(readMessageText(node)));
+  const hints: string[] = [];
+
+  if (latestTaskDefinition) {
+    const text = extractExplicitTaskDefinition(readMessageText(latestTaskDefinition))
+      ?? readMessageText(latestTaskDefinition);
+    if (text) {
+      hints.push(`Latest task-defining user message: ${text}`);
+      hints.push(`Canonical current session task: ${text}`);
+    }
+  }
+
+  if (latestUserNextStep) {
+    hints.push(`Latest user-defined next step: ${latestUserNextStep}`);
+    hints.push(`Canonical current session next step: ${latestUserNextStep}`);
+  } else if (latestAssistantCommitment) {
+    const text = readMessageText(latestAssistantCommitment);
+    if (text) {
+      hints.push(`Latest assistant commitment: ${text}`);
+      hints.push(`Canonical current session next step: ${text}`);
+    }
+  }
+
+  if (latestTaskDefinition || latestUserNextStep || latestAssistantCommitment) {
+    hints.push('For current-task or next-step recall, prefer the canonical current session task and next step above over unrelated long-term memory from other sessions.');
+  }
+
+  return hints;
 }
 
 function classifyBucket(kind: BaseNode['kind']): AssembleBucket['name'] {
@@ -275,6 +427,26 @@ function estimateNodeTokens(node: BaseNode): number {
   return Math.max(16, Math.ceil(JSON.stringify(node.payload).length / 4));
 }
 
+function looksLikeConversationRecall(currentTurnText?: string): boolean {
+  const text = currentTurnText ?? '';
+  return looksLikeConversationRecallCue(text) || /\bremember this exactly\b/i.test(text);
+}
+
+function looksLikeAssistantCommitment(text?: string): boolean {
+  const normalized = (text ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /\bnext step\b/.test(normalized)
+    || /\bi(?:'| wi)ll\b/.test(normalized)
+    || /\bready\b/.test(normalized)
+    || /\bupdated\b/.test(normalized)
+    || /\bstored\b/.test(normalized)
+    || /\bconfirm\b/.test(normalized)
+    || /\bcontinue\b/.test(normalized);
+}
+
 function nodeToMessage(node: BaseNode): Record<string, unknown> {
   return {
     id: node.id,
@@ -282,6 +454,11 @@ function nodeToMessage(node: BaseNode): Record<string, unknown> {
     createdAt: node.createdAt,
     content: node.payload,
   };
+}
+
+function readMessageText(node: BaseNode): string | undefined {
+  const payload = node.payload as { text?: unknown };
+  return typeof payload.text === 'string' && payload.text.trim() ? payload.text.trim() : undefined;
 }
 
 function readLayer(node: BaseNode | undefined): string | undefined {
