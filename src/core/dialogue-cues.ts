@@ -2,6 +2,21 @@ export function normalizeDialogueCueText(text: string | null | undefined): strin
   return stripDialogueScaffolding(text ?? '').toLowerCase();
 }
 
+export function looksLikeSyntheticContextBridgeText(text: string | null | undefined): boolean {
+  const normalized = stripDialogueScaffolding(text ?? '').trim();
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized.startsWith('[Hypergraph Context Bridge]')) {
+    return true;
+  }
+
+  return normalized.includes('HypergraphContextEngine assembled task-state-guided context.')
+    || normalized.includes('HypergraphContextEngine fallback assemble:')
+    || normalized.includes('Recovered context:');
+}
+
 export function looksLikeConversationRecall(text: string | null | undefined): boolean {
   const normalized = normalizeDialogueCueText(text);
   if (!normalized) {
@@ -38,6 +53,16 @@ export function looksLikeTaskContinuationQuery(text: string | null | undefined):
   }
 
   return false;
+}
+
+export function looksLikeDetailSeekingQuery(text: string | null | undefined): boolean {
+  const normalized = normalizeDialogueCueText(text);
+  if (!normalized) {
+    return false;
+  }
+
+  return /\b(detail|detailed|details|exact|exactly|verbatim|raw|full text|full content|show me|show the|why|how|design|architecture|implement(?:ation)?|trace)\b/.test(normalized)
+    || /细节|详细|原文|全文|完整|为什么|怎么做|设计|架构|实现|追踪/u.test(normalized);
 }
 
 export function looksLikeRecallIntent(text: string | null | undefined): boolean {
@@ -206,6 +231,7 @@ function extractCueValue(text: string | null | undefined, patterns: RegExp[]): s
 
     const value = raw
       .slice((match.index ?? 0) + match[0].length)
+      .split(/(?:^|[.:]\s*)(?:current task|next step|当前任务|下一步)\s*(?:is|[:：-])\s*/iu)[0]
       .replace(/^[\s:：-]+/, '')
       .replace(/[.。!?！？]+$/, '')
       .trim();
@@ -220,6 +246,7 @@ function extractCueValue(text: string | null | undefined, patterns: RegExp[]): s
 function stripDialogueScaffolding(text: string): string {
   return text
     .trim()
+    .replace(/^\[Hypergraph Context Bridge\]\s*/u, '')
     .replace(/^\[[^[\]]+\]\s*/u, '')
     .replace(/^(?:user|assistant|system)\s*[:：-]\s*/i, '')
     .trim();

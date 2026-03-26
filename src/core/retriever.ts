@@ -6,7 +6,11 @@ import type {
   RetrievalCandidate,
   TaskState,
 } from '../../schemas/types.js';
-import { looksLikeConversationRecall, looksLikeTaskContinuationQuery } from './dialogue-cues.js';
+import {
+  looksLikeConversationRecall,
+  looksLikeDetailSeekingQuery,
+  looksLikeTaskContinuationQuery,
+} from './dialogue-cues.js';
 
 export interface RetrieveInput {
   nodes: BaseNode[];
@@ -61,8 +65,9 @@ export function scoreCandidates(
       const redundancyPenalty = index > 0 && nodes[index - 1]?.kind === node.kind ? 0.15 : 0;
       const layerWeight = resolveLayerWeight(node);
       const namespaceWeight = resolveNamespaceWeight(node, memoryNamespace, queryMode);
+      const detailWeight = resolveDetailWeight(node, currentTurnText, queryMode);
       const finalScore = Number(
-        ((0.35 * graphScore + 0.25 * retrievalScore + 0.2 * recencyScore + 0.2 * utilityScore) * layerWeight * namespaceWeight - redundancyPenalty).toFixed(3),
+        ((0.35 * graphScore + 0.25 * retrievalScore + 0.2 * recencyScore + 0.2 * utilityScore) * layerWeight * namespaceWeight * detailWeight - redundancyPenalty).toFixed(3),
       );
 
       return {
@@ -181,6 +186,60 @@ function resolveNamespaceWeight(
       return 0.18;
     default:
       return 0.5;
+  }
+}
+
+function resolveDetailWeight(
+  node: BaseNode,
+  currentTurnText: string | undefined,
+  queryMode: MemoryQueryMode,
+): number {
+  if (node.kind !== 'memory_chunk') {
+    return 1;
+  }
+
+  const payload = node.payload as Partial<MemoryChunkPayload> | undefined;
+  const level = payload?.selectedDetailLevel;
+
+  if (!level) {
+    return 1;
+  }
+
+  if (queryMode === 'conversation_recall' || queryMode === 'task_continuation') {
+    switch (level) {
+      case 'L0':
+        return 1.15;
+      case 'L1':
+        return 1.05;
+      case 'L2':
+        return 0.72;
+      default:
+        return 1;
+    }
+  }
+
+  if (looksLikeDetailSeekingQuery(currentTurnText)) {
+    switch (level) {
+      case 'L2':
+        return 1.18;
+      case 'L1':
+        return 1.08;
+      case 'L0':
+        return 0.94;
+      default:
+        return 1;
+    }
+  }
+
+  switch (level) {
+    case 'L0':
+      return 1.12;
+    case 'L1':
+      return 1.06;
+    case 'L2':
+      return 0.84;
+    default:
+      return 1;
   }
 }
 

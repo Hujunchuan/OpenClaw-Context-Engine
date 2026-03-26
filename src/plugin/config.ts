@@ -12,6 +12,7 @@ export interface ContextEnginePluginConfig {
   flushOnAfterTurn?: boolean;
   flushOnCompact?: boolean;
   promoteOnMaintenance?: boolean;
+  maintenanceMinIntervalMs?: number;
   runtimeIdentityDebug?: boolean;
 }
 
@@ -34,6 +35,7 @@ export interface ResolvedContextEngineConfig {
   flushOnAfterTurn: boolean;
   flushOnCompact: boolean;
   promoteOnMaintenance: boolean;
+  maintenanceMinIntervalMs: number;
   runtimeIdentityDebug: boolean;
 }
 
@@ -90,6 +92,10 @@ export const CONTEXT_ENGINE_CONFIG_SCHEMA = {
       type: 'boolean',
       description: 'Re-hydrate and apply lifecycle maintenance during afterTurn.',
     },
+    maintenanceMinIntervalMs: {
+      type: 'number',
+      description: 'Minimum delay between afterTurn maintenance runs for the same session to avoid rewriting layered memory every turn.',
+    },
     runtimeIdentityDebug: {
       type: 'boolean',
       description: 'Append debug-only runtime identity diagnostics so real OpenClaw namespace alignment can be inspected during integration testing.',
@@ -116,6 +122,7 @@ export function normalizeContextEngineConfig(input?: ContextEngineConfigInput): 
     flushOnAfterTurn: runtimeConfig.flushOnAfterTurn ?? true,
     flushOnCompact: runtimeConfig.flushOnCompact ?? true,
     promoteOnMaintenance: runtimeConfig.promoteOnMaintenance ?? true,
+    maintenanceMinIntervalMs: runtimeConfig.maintenanceMinIntervalMs ?? 30_000,
     runtimeIdentityDebug:
       runtimeConfig.runtimeIdentityDebug
       ?? readBooleanEnv('OPENCLAW_CONTEXT_ENGINE_RUNTIME_IDENTITY_DEBUG')

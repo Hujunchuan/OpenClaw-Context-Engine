@@ -6,6 +6,12 @@ import {
 } from '../core/dialogue-cues.js';
 
 const CONTEXT_ENGINE_SOURCE = 'hypergraph-context-engine';
+const CONTEXT_BRIDGE_PREFIX = '[Hypergraph Context Bridge]';
+const CONTEXT_BRIDGE_MARKERS = [
+  'HypergraphContextEngine assembled task-state-guided context.',
+  'HypergraphContextEngine fallback assemble:',
+  'Recovered context:',
+] as const;
 
 export type SlotSafeAnchor =
   | 'first_user_message'
@@ -116,12 +122,20 @@ export function getContextEngineSource(): string {
 }
 
 export function shouldSyncRuntimeMessage(message: Record<string, unknown>): boolean {
-  return message.source !== CONTEXT_ENGINE_SOURCE;
+  if (message.source === CONTEXT_ENGINE_SOURCE) {
+    return false;
+  }
+
+  return !looksLikeSyntheticContextBridgeMessage(message);
 }
 
 export function extractLatestUserTextFromRuntimeMessages(messages: Array<Record<string, unknown>>): string | undefined {
   const reversed = [...messages].reverse();
   for (const message of reversed) {
+    if (!shouldSyncRuntimeMessage(message)) {
+      continue;
+    }
+
     const role = readMessageRole(message);
     if (role !== 'user') {
       continue;
@@ -288,6 +302,20 @@ export function detectSlotSafeRuntimeProfile(
 
 function looksLikeRuntimeMessage(message: Record<string, unknown>): boolean {
   return typeof message.role === 'string' && 'content' in message;
+}
+
+function looksLikeSyntheticContextBridgeMessage(message: Record<string, unknown>): boolean {
+  const text = normalizeRuntimeContentToText(message.content);
+  if (!text) {
+    return false;
+  }
+
+  const normalized = text.trim();
+  if (normalized.startsWith(CONTEXT_BRIDGE_PREFIX)) {
+    return true;
+  }
+
+  return CONTEXT_BRIDGE_MARKERS.some((marker) => normalized.includes(marker));
 }
 
 function isCanonicalRuntimeMessage(message: Record<string, unknown>): boolean {

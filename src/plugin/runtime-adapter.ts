@@ -27,6 +27,7 @@ export function getOrCreateRuntimeAdapter(input?: RuntimeConfigLike): OpenClawHy
         flushOnAfterTurn: config.flushOnAfterTurn,
         flushOnCompact: config.flushOnCompact,
         promoteOnMaintenance: config.promoteOnMaintenance,
+        maintenanceMinIntervalMs: config.maintenanceMinIntervalMs,
         runtimeIdentityDebug: config.runtimeIdentityDebug,
       })
     : new OpenClawHypergraphAdapter({
@@ -39,6 +40,7 @@ export function getOrCreateRuntimeAdapter(input?: RuntimeConfigLike): OpenClawHy
         flushOnAfterTurn: config.flushOnAfterTurn,
         flushOnCompact: config.flushOnCompact,
         promoteOnMaintenance: config.promoteOnMaintenance,
+        maintenanceMinIntervalMs: config.maintenanceMinIntervalMs,
         runtimeIdentityDebug: config.runtimeIdentityDebug,
       });
 
@@ -65,6 +67,7 @@ function buildAdapterCacheKey(config: RuntimeAdapterConfig): string {
     flushOnAfterTurn: config.flushOnAfterTurn,
     flushOnCompact: config.flushOnCompact,
     promoteOnMaintenance: config.promoteOnMaintenance,
+    maintenanceMinIntervalMs: config.maintenanceMinIntervalMs,
     runtimeIdentityDebug: config.runtimeIdentityDebug,
   });
 }

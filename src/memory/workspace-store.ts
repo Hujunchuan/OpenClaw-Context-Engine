@@ -37,10 +37,19 @@ export interface WriteMaintenanceParams {
 }
 
 export class LayeredMemoryWorkspaceStore {
+  private cachedEntries?: StoredMemoryEntry[];
+  private cachedManagedLayerFiles?: string[];
+
   constructor(public readonly rootDir: string) {}
 
-  readEntries(): StoredMemoryEntry[] {
+  readEntries(forceRefresh = false): StoredMemoryEntry[] {
+    if (!forceRefresh && this.cachedEntries) {
+      return [...this.cachedEntries];
+    }
+
     if (!existsSync(this.rootDir)) {
+      this.cachedEntries = [];
+      this.cachedManagedLayerFiles = [];
       return [];
     }
 
@@ -58,7 +67,12 @@ export class LayeredMemoryWorkspaceStore {
       }
     }
 
-    return [...deduped.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+    this.cachedEntries = [...deduped.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+    this.cachedManagedLayerFiles = this.cachedEntries
+      .map((entry) => entry.relativePath)
+      .filter((relativePath) => shouldRewriteManagedLayerFile(relativePath));
+
+    return [...this.cachedEntries];
   }
 
   writeFlush(plan: LayeredMemoryFlushPlan): WriteFlushResult {
@@ -71,8 +85,9 @@ export class LayeredMemoryWorkspaceStore {
     writeFileSync(nowPath, renderNowDocument(plan.nowState), 'utf8');
     writtenFiles.push(nowRelativePath);
 
-    const existingByPath = new Map(this.readEntries().map((entry) => [entry.relativePath, entry]));
-    const existingByKey = new Map(this.readEntries().map((entry) => [entry.dedupeKey, entry]));
+    const existingEntries = this.readEntries();
+    const existingByPath = new Map(existingEntries.map((entry) => [entry.relativePath, entry]));
+    const existingByKey = new Map(existingEntries.map((entry) => [entry.dedupeKey, entry]));
 
     for (const entry of plan.entries) {
       const nextPath = resolveMemoryRelativePath(entry);
@@ -115,19 +130,23 @@ export class LayeredMemoryWorkspaceStore {
     appendFileSync(dailyPath, `\n## ${plan.nowState.updatedAt}\n${plan.dailyAudit.map((line) => `- ${line}`).join('\n')}\n`, 'utf8');
     writtenFiles.push(dailyRelativePath);
 
-    const allEntries = this.readEntries();
+    this.invalidateCache();
+    const allEntries = this.readEntries(true);
     const memoryRelativePath = resolveMemoryCoreRelativePath();
     const memoryPath = resolve(this.rootDir, memoryRelativePath);
     mkdirSync(dirname(memoryPath), { recursive: true });
     writeFileSync(memoryPath, renderMemoryCoreSummary(allEntries), 'utf8');
     writtenFiles.push(memoryRelativePath);
 
+    this.invalidateCache();
     return { writtenFiles: uniqueStrings(writtenFiles) };
   }
 
   writeMaintenance(params: WriteMaintenanceParams): WriteFlushResult {
     mkdirSync(this.rootDir, { recursive: true });
+    this.invalidateCache();
     const writtenFiles = this.rewriteLayeredEntries(params.entries);
+    this.invalidateCache();
 
     return { writtenFiles: uniqueStrings(writtenFiles) };
   }
@@ -154,6 +173,13 @@ export class LayeredMemoryWorkspaceStore {
         sourceFile: relativePath,
         title: 'Current State',
         summary: nowState.currentTask ?? '(unknown)',
+        abstract: nowState.currentTask ?? '(unknown)',
+        overview: [
+          nowState.currentTask ?? '(unknown)',
+          ...nowState.currentPlan.slice(0, 2),
+          ...nowState.nextSteps.slice(0, 2),
+        ].filter(Boolean).join('\n'),
+        detail: parsed.body.trim(),
         text: parsed.body.trim(),
         category: 'current-task',
         routeReason: 'Explicit NOW document capturing current state.',
@@ -181,6 +207,9 @@ export class LayeredMemoryWorkspaceStore {
         sourceFile: relativePath,
         title: 'Curated Long-Term Memory',
         summary: firstMeaningfulLine(parsed.body) ?? 'Curated memory summary',
+        abstract: firstMeaningfulLine(parsed.body) ?? 'Curated memory summary',
+        overview: parsed.body.trim(),
+        detail: parsed.body.trim(),
         text: parsed.body.trim(),
         category: 'memory-core',
         routeReason: 'Curated long-term memory summary.',
@@ -204,6 +233,9 @@ export class LayeredMemoryWorkspaceStore {
       sourceFile: relativePath,
       title: asString(parsed.frontmatter.title) ?? titleFromPath(relativePath),
       summary: asString(parsed.frontmatter.summary) ?? firstMeaningfulLine(parsed.body) ?? titleFromPath(relativePath),
+      abstract: asString(parsed.frontmatter.abstract) ?? asString(parsed.frontmatter.summary) ?? firstMeaningfulLine(parsed.body) ?? titleFromPath(relativePath),
+      overview: asString(parsed.frontmatter.overview) ?? asString(parsed.frontmatter.summary) ?? firstMeaningfulLine(parsed.body) ?? titleFromPath(relativePath),
+      detail: parsed.body.trim() || asString(parsed.frontmatter.overview) || asString(parsed.frontmatter.summary),
       text: parsed.body.trim(),
       category: asString(parsed.frontmatter.category) ?? inferCategoryFromPath(relativePath),
       routeReason: asString(parsed.frontmatter.route_reason),
@@ -302,13 +334,24 @@ export class LayeredMemoryWorkspaceStore {
   }
 
   private collectManagedLayerFiles(): string[] {
+    if (this.cachedManagedLayerFiles) {
+      return [...this.cachedManagedLayerFiles];
+    }
+
     if (!existsSync(this.rootDir)) {
       return [];
     }
 
-    return this.collectMarkdownFiles(this.rootDir)
+    this.cachedManagedLayerFiles = this.collectMarkdownFiles(this.rootDir)
       .map((filePath) => relative(this.rootDir, filePath).replace(/\\/g, '/'))
       .filter((relativePath) => shouldRewriteManagedLayerFile(relativePath));
+
+    return [...this.cachedManagedLayerFiles];
+  }
+
+  private invalidateCache(): void {
+    this.cachedEntries = undefined;
+    this.cachedManagedLayerFiles = undefined;
   }
 }
 
@@ -350,6 +393,8 @@ function renderMemoryEntry(entry: StoredMemoryEntry): string {
     `scope: ${entry.scope}`,
     `title: ${sanitizeFrontmatter(entry.title)}`,
     `summary: ${sanitizeFrontmatter(entry.summary)}`,
+    `abstract: ${sanitizeFrontmatter(entry.abstract)}`,
+    `overview: ${sanitizeFrontmatter(entry.overview)}`,
     entry.category ? `category: ${sanitizeFrontmatter(entry.category)}` : undefined,
     entry.routeReason ? `route_reason: ${sanitizeFrontmatter(entry.routeReason)}` : undefined,
     `dedupe_key: ${entry.dedupeKey}`,

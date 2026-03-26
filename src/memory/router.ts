@@ -12,6 +12,7 @@ import {
   extractExplicitTaskDefinition,
   looksLikeLowSignalStateNoise,
   looksLikeRecallIntent,
+  looksLikeSyntheticContextBridgeText,
 } from '../core/dialogue-cues.js';
 
 export interface LayeredMemoryCandidate {
@@ -133,6 +134,7 @@ export function routeMemoryCandidate(candidate: LayeredMemoryCandidate): RoutedL
   const layer = classifyMemoryLayer(candidate);
   const category = candidate.category ?? inferCategory(candidate, layer);
   const dedupeKey = createDedupeKey(category, candidate.title, candidate.summary);
+  const detailLevels = buildDetailLevels(candidate);
 
   const entry: RoutedLayeredMemoryEntry = {
     layer,
@@ -140,7 +142,10 @@ export function routeMemoryCandidate(candidate: LayeredMemoryCandidate): RoutedL
     sourceFile: '',
     title: candidate.title,
     summary: candidate.summary,
-    text: [candidate.summary, ...(candidate.details ?? [])].join('\n'),
+    abstract: detailLevels.abstract,
+    overview: detailLevels.overview,
+    detail: detailLevels.detail,
+    text: detailLevels.detail,
     category,
     routeReason: describeRouteReason(candidate, layer),
     dedupeKey,
@@ -343,7 +348,88 @@ function collectCandidates(
     });
   }
 
+  candidates.push(...collectUserPreferenceCandidates(nodes, existingByKey));
+  candidates.push(...collectAgentExperienceCandidates(nodes, existingByKey));
+
   return candidates;
+}
+
+function collectUserPreferenceCandidates(
+  nodes: BaseNode[],
+  existingByKey: Map<string, MemoryChunkPayload>,
+): LayeredMemoryCandidate[] {
+  const userMessages = nodes
+    .filter((node) => node.kind === 'message' && (node.payload as { role?: unknown }).role === 'user')
+    .map((node) => readNodeText(node))
+    .filter((value): value is string => Boolean(value));
+
+  return uniqueTexts(userMessages)
+    .filter((text) => !looksLikeSyntheticContextBridgeText(text))
+    .filter((text) => looksLikeUserPreference(text))
+    .map((text) => {
+      const dedupeKey = createDedupeKey('user-profile', text, text);
+      const existing = existingByKey.get(dedupeKey);
+      return {
+        title: summarizeTitle('User Preference', text),
+        summary: text,
+        details: [text],
+        category: 'user-profile',
+        scope: 'user',
+        persistence: 'long_term',
+        recurrence: Math.max(1, (existing?.recurrence ?? 0) + 1),
+        connectivity: Math.max(2, (existing?.connectivity ?? 0), 2),
+        activationEnergy: 'high',
+      };
+    });
+}
+
+function collectAgentExperienceCandidates(
+  nodes: BaseNode[],
+  existingByKey: Map<string, MemoryChunkPayload>,
+): LayeredMemoryCandidate[] {
+  const experienceTexts = nodes
+    .filter((node) => node.kind === 'tool_result'
+      || (node.kind === 'message' && (node.payload as { role?: unknown }).role === 'assistant'))
+    .map((node) => readNodeText(node))
+    .filter((value): value is string => Boolean(value) && !looksLikeLowSignalStateNoise(value));
+
+  return uniqueTexts(experienceTexts)
+    .filter((text) => !looksLikeSyntheticContextBridgeText(text))
+    .filter((text) => matchesAny(REUSABLE_PATTERN_CUES, text))
+    .map((text) => {
+      const dedupeKey = createDedupeKey('agent-experience', text, text);
+      const existing = existingByKey.get(dedupeKey);
+      return {
+        title: summarizeTitle('Agent Experience', text),
+        summary: text,
+        details: [text],
+        category: 'agent-experience',
+        scope: 'workflow',
+        persistence: 'project',
+        recurrence: Math.max(2, (existing?.recurrence ?? 0) + 1),
+        connectivity: Math.max(2, (existing?.connectivity ?? 0), 2),
+        activationEnergy: 'medium',
+      };
+    });
+}
+
+function buildDetailLevels(candidate: LayeredMemoryCandidate): {
+  abstract: string;
+  overview: string;
+  detail: string;
+} {
+  const detailLines = [candidate.summary, ...(candidate.details ?? [])]
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const abstract = sanitizeDetailLine(candidate.summary);
+  const overview = uniqueTexts([abstract, ...detailLines.slice(0, 2)]).join('\n');
+  const detail = uniqueTexts(detailLines).join('\n');
+
+  return {
+    abstract,
+    overview: overview || abstract,
+    detail: detail || abstract,
+  };
 }
 
 function buildNowState(
@@ -363,8 +449,10 @@ function buildNowState(
       ? selectCurrentTaskSummary(taskState, existingByKey, nodes, namespace) ?? null
       : taskState.intent);
   const blockers = uniqueNowItems(taskState.openLoops)
-    .filter((value) => value !== explicitNextStep)
+    .filter((value) => !matchesNowText(value, explicitNextStep))
     .filter((value) => !looksLikeNonActionableStatus(value))
+    .filter((value) => !looksLikeCompletedNowAction(value))
+    .filter((value) => !looksLikeCompletionEchoPlan(value))
     .filter((value) => !matchesNowText(value, currentTask))
     .slice(0, 4);
   const nextSteps = uniqueNowItems([
@@ -382,6 +470,8 @@ function buildNowState(
       .filter((value): value is string => Boolean(value)),
   )
     .filter((value) => !looksLikeNonActionableStatus(value))
+    .filter((value) => !looksLikeCompletedNowAction(value))
+    .filter((value) => !looksLikeCompletionEchoPlan(value))
     .filter((value) => !matchesNowText(value, currentTask))
     .filter((value) => !nextSteps.some((nextStep) => matchesNowText(value, nextStep)))
     .filter((value) => !blockers.some((blocker) => matchesNowText(value, blocker)))
@@ -451,7 +541,7 @@ function collectRelatedDetails(seed: string, nodes: BaseNode[]): string[] {
   const normalized = seed.toLowerCase();
   return uniqueTexts(
     nodes
-      .map((node) => JSON.stringify(node.payload))
+      .map((node) => readNodeText(node) ?? JSON.stringify(node.payload))
       .filter((text) => text.toLowerCase().includes(normalized))
       .slice(-3),
   );
@@ -560,6 +650,15 @@ function normalizeMemoryDedupeText(value: string): string {
     .join(' ');
 }
 
+function sanitizeDetailLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function looksLikeUserPreference(text: string): boolean {
+  return /\b(i prefer|prefer |please always|always use|never use|reply with|remember that i|for me\b)/i.test(text)
+    || /我更喜欢|请始终|请一直|不要用|记住我/u.test(text);
+}
+
 function selectCurrentTaskSummary(
   taskState: TaskState,
   existingByKey: Map<string, MemoryChunkPayload>,
@@ -638,7 +737,11 @@ function readNodeText(node: BaseNode): string | undefined {
     payload.intent,
     payload.question,
     payload.summary,
-  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  ].find((value): value is string =>
+    typeof value === 'string'
+    && value.trim().length > 0
+    && !looksLikeSyntheticContextBridgeText(value),
+  );
 }
 
 function readNodeRole(node: BaseNode): 'user' | 'assistant' | undefined {
@@ -657,6 +760,19 @@ function looksLikeNonActionableStatus(value: string): boolean {
     || /\btask is done\b/.test(normalized)
     || /\bno remaining issues\b/.test(normalized)
     || /\bstabilization is complete\b/.test(normalized);
+}
+
+function looksLikeCompletedNowAction(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return /(?:^|\s)(?:already\s+)?(?:done|done\.|completed|complete|resolved|finished)(?:$|\s|\))/i.test(normalized)
+    || /✅|✔️|☑️/u.test(value);
+}
+
+function looksLikeCompletionEchoPlan(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return /^(stored|saved|remembered|confirmed)\b/.test(normalized)
+    || (/\bconfirmed\b/.test(normalized) && /\bwritten\b/.test(normalized))
+    || /\bfiles confirmed written\b/.test(normalized);
 }
 
 function compactNowSummary(value: string | undefined, kind: 'plan' | 'action'): string | undefined {
@@ -678,12 +794,12 @@ function compactNowSummary(value: string | undefined, kind: 'plan' | 'action'): 
 
   const explicitTask = extractExplicitTaskDefinition(normalized);
   if (explicitTask) {
-    return kind === 'plan' ? undefined : explicitTask;
+    return kind === 'plan' ? undefined : stripNowCompletionDecorators(explicitTask);
   }
 
   const explicitNextStep = extractExplicitNextStep(normalized);
   if (explicitNextStep) {
-    return explicitNextStep;
+    return stripNowCompletionDecorators(explicitNextStep);
   }
 
   const stripped = normalized
@@ -704,7 +820,8 @@ function compactNowSummary(value: string | undefined, kind: 'plan' | 'action'): 
     return undefined;
   }
 
-  return sentence.length > 140 ? `${sentence.slice(0, 137).trim()}...` : sentence;
+  const cleaned = stripNowCompletionDecorators(sentence);
+  return cleaned.length > 140 ? `${cleaned.slice(0, 137).trim()}...` : cleaned;
 }
 
 function uniqueNowItems(values: Array<string | null | undefined>): string[] {
@@ -730,9 +847,18 @@ function uniqueNowItems(values: Array<string | null | undefined>): string[] {
 }
 
 function normalizeNowKey(value: string): string {
-  return value
+  return stripNowCompletionDecorators(value)
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripNowCompletionDecorators(value: string): string {
+  return value
+    .replace(/[✅✔️☑️]/gu, ' ')
+    .replace(/\((?:already\s+)?(?:complete|completed|done|resolved|finished)\)/gi, ' ')
+    .replace(/\b(?:already\s+)?(?:complete|completed|done|resolved|finished)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }

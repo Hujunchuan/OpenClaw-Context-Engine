@@ -14,6 +14,7 @@ import {
   isExplicitTaskDefinition,
   looksLikeLowSignalStateNoise,
   looksLikeRecallIntent,
+  looksLikeSyntheticContextBridgeText,
 } from './dialogue-cues.js';
 
 const MAX_ITEMS_PER_BUCKET = 8;
@@ -823,6 +824,10 @@ function sanitizeStateText(value: string | undefined): string | undefined {
     .trim();
 
   if (!cleaned || cleaned.length < 2) {
+    return undefined;
+  }
+
+  if (looksLikeSyntheticContextBridgeText(cleaned)) {
     return undefined;
   }
 

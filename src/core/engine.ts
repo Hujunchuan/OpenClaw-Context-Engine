@@ -68,6 +68,7 @@ export interface HypergraphContextEngineOptions {
   flushOnAfterTurn?: boolean;
   flushOnCompact?: boolean;
   promoteOnMaintenance?: boolean;
+  maintenanceMinIntervalMs?: number;
   runtimeIdentityDebug?: boolean;
 }
 
@@ -84,6 +85,8 @@ export class HypergraphContextEngine {
   private readonly flushOnAfterTurn: boolean;
   private readonly flushOnCompact: boolean;
   private readonly promoteOnMaintenance: boolean;
+  private readonly maintenanceMinIntervalMs: number;
+  private readonly lastMaintenanceAtBySession = new Map<string, number>();
 
   constructor(options: HypergraphContextEngineOptions = {}) {
     this.sessionStore = options.sessionStore ?? options.store;
@@ -95,6 +98,7 @@ export class HypergraphContextEngine {
     this.flushOnAfterTurn = options.flushOnAfterTurn ?? this.enableLayeredWrite;
     this.flushOnCompact = options.flushOnCompact ?? this.enableLayeredWrite;
     this.promoteOnMaintenance = options.promoteOnMaintenance ?? true;
+    this.maintenanceMinIntervalMs = Math.max(0, options.maintenanceMinIntervalMs ?? 30_000);
     void options.runtimeIdentityDebug;
   }
 
@@ -199,8 +203,9 @@ export class HypergraphContextEngine {
       await this.flushMemory(sessionId, 'turn_end', namespace);
     }
 
-    if (this.promoteOnMaintenance) {
+    if (this.promoteOnMaintenance && this.shouldRunMaintenance(sessionId)) {
       this.memoryRepository?.maintain({ sessionId, ...namespace });
+      this.lastMaintenanceAtBySession.set(sessionId, Date.now());
     }
 
     void taskState;
@@ -246,12 +251,17 @@ export class HypergraphContextEngine {
     };
   }
 
-  hydrateMemory(sessionId: string, namespace?: NamespaceHints, queryGateMode: QueryGateMode = 'default'): BaseNode[] {
+  hydrateMemory(
+    sessionId: string,
+    namespace?: NamespaceHints,
+    queryGateMode: QueryGateMode = 'default',
+    queryText?: string,
+  ): BaseNode[] {
     if (!this.enableLayeredRead || !this.memoryRepository) {
       return [];
     }
 
-    return this.memoryRepository.read({ sessionId, ...namespace, queryGateMode }).nodes;
+    return this.memoryRepository.read({ sessionId, ...namespace, queryGateMode, queryText }).nodes;
   }
 
   private requireSession(sessionId: string): PersistableSessionSnapshot | undefined {
@@ -322,6 +332,7 @@ export class HypergraphContextEngine {
       sessionId,
       input,
       this.resolveAssembleQueryGateMode(input?.currentTurnText),
+      input?.currentTurnText,
     );
     if (memoryNodes.length === 0) {
       return baseSnapshot;
@@ -351,6 +362,19 @@ export class HypergraphContextEngine {
     }
 
     return mode;
+  }
+
+  private shouldRunMaintenance(sessionId: string): boolean {
+    if (this.maintenanceMinIntervalMs === 0) {
+      return true;
+    }
+
+    const lastMaintenanceAt = this.lastMaintenanceAtBySession.get(sessionId);
+    if (!lastMaintenanceAt) {
+      return true;
+    }
+
+    return (Date.now() - lastMaintenanceAt) >= this.maintenanceMinIntervalMs;
   }
 }
 

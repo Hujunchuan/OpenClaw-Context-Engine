@@ -52,6 +52,9 @@ test('routeMemoryCandidate classifies state, reusable patterns, and long-term fa
   assert.equal(hot.layer, 'hot');
   assert.equal(warm.layer, 'warm');
   assert.equal(cold.layer, 'cold');
+  assert.ok(hot.abstract.length > 0);
+  assert.ok(hot.overview.length >= hot.abstract.length);
+  assert.ok((hot.detail ?? '').includes(hot.summary));
 });
 
 test('workspace store writes layered markdown files and can re-index them', () => {
@@ -395,6 +398,8 @@ test('routeLayeredMemory preserves the prior hot current-task summary when the l
         sourceFile: 'memory/hot/current-task.md',
         title: 'Current Task State',
         summary: 'Validate Hypergraph Context Engine on Ubuntu',
+        abstract: 'Current Task State',
+        overview: 'Current Task State: Validate Hypergraph Context Engine on Ubuntu',
         text: 'Validate Hypergraph Context Engine on Ubuntu',
         category: 'current-task',
         routeReason: 'Current task state',
@@ -580,6 +585,45 @@ test('repository query gate can skip long-term memory or keep only session-hot m
   assert.ok(sessionHotOnly.entries.every((entry) => entry.layer === 'hot' && entry.lastSessionId === 'session-alpha'));
   assert.equal(transcriptOnly.entries.length, 0);
   assert.equal(transcriptOnly.nodes.length, 0);
+});
+
+test('repository projects L0/L1 by default and unlocks L2 for detail-seeking queries', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'layered-memory-detail-levels-'));
+  const repository = new WorkspaceMemoryRepository(tempDir);
+  const now = '2026-03-25T09:00:00.000Z';
+
+  repository.flush({
+    sessionId: 'detail-session',
+    agentId: 'agent-detail',
+    workspaceId: '/workspace/detail',
+    reason: 'manual_save',
+    nodes: [],
+    taskState: {
+      ...materializeTaskState('detail-session', [], []),
+      sessionId: 'detail-session',
+      intent: 'Current task: document the full implementation details for the scoped retrieval pipeline.',
+      activeDecisions: ['Use L0 and L1 by default, and only unlock L2 for detail-seeking queries.'],
+      toolFacts: ['Detailed evidence should remain available for deep-dive questions.'],
+      lastUpdatedAt: now,
+    },
+  });
+
+  const continuationRead = repository.read({
+    sessionId: 'detail-session',
+    agentId: 'agent-detail',
+    workspaceId: '/workspace/detail',
+    queryGateMode: 'session_hot_only',
+    queryText: 'What is the current task and next step?',
+  });
+  const detailRead = repository.read({
+    sessionId: 'detail-session',
+    agentId: 'agent-detail',
+    workspaceId: '/workspace/detail',
+    queryText: 'Show me the full implementation details and exact evidence for the scoped retrieval pipeline.',
+  });
+
+  assert.ok(continuationRead.entries.every((entry) => entry.selectedDetailLevel !== 'L2'));
+  assert.ok(detailRead.entries.some((entry) => entry.selectedDetailLevel === 'L2'));
 });
 
 test('engine flushes markdown memory and a fresh engine can hydrate it back into assemble', async () => {
@@ -911,6 +955,106 @@ test('routeLayeredMemory emits hot entries from current task state and stable pr
   assert.ok(routed.entries.some((entry) => entry.layer === 'cold'));
 });
 
+test('routeLayeredMemory extracts user preference and agent experience candidates into scoped memory', () => {
+  const now = '2026-03-25T10:00:00.000Z';
+  const nodes: BaseNode[] = [
+    {
+      id: 'u-pref',
+      kind: 'message',
+      sessionId: 'memory-self-iteration',
+      createdAt: now,
+      payload: {
+        role: 'user',
+        text: 'Please always reply with concise bullet points and remember that I prefer transcript-first debugging.',
+      },
+    },
+    {
+      id: 'a-exp',
+      kind: 'message',
+      sessionId: 'memory-self-iteration',
+      createdAt: '2026-03-25T10:00:10.000Z',
+      payload: {
+        role: 'assistant',
+        text: 'We should reuse the slot-safe selection pattern and keep semantic augmentation in systemPromptAddition.',
+      },
+    },
+    {
+      id: 'tool-exp',
+      kind: 'tool_result',
+      sessionId: 'memory-self-iteration',
+      createdAt: '2026-03-25T10:00:20.000Z',
+      payload: {
+        text: 'Tool result: the scoped retrieval workflow stayed stable after the validation pass.',
+      },
+    },
+  ];
+
+  const routed = routeLayeredMemory({
+    sessionId: 'memory-self-iteration',
+    agentId: 'agent-memory',
+    workspaceId: '/workspace/memory',
+    now,
+    reason: 'turn_end',
+    nodes,
+    taskState: {
+      ...materializeTaskState('memory-self-iteration', nodes, []),
+      sessionId: 'memory-self-iteration',
+      intent: 'Current task: stabilize scoped memory self-iteration.',
+      lastUpdatedAt: now,
+    },
+  });
+
+  assert.ok(routed.entries.some((entry) => entry.category === 'user-profile' && entry.scope === 'user'));
+  assert.ok(routed.entries.some((entry) => entry.category === 'agent-experience' && entry.scope === 'workflow'));
+});
+
+test('routeLayeredMemory deduplicates completed next-step echoes and keeps them out of blockers', () => {
+  const now = '2026-03-26T01:00:00.000Z';
+  const nodes: BaseNode[] = [
+    {
+      id: 'u-task',
+      kind: 'message',
+      sessionId: 'now-dedupe-session',
+      createdAt: now,
+      payload: {
+        role: 'user',
+        text: 'Current task: reconnect hypergraph context engine. Next step: confirm scoped memory files are written.',
+      },
+    },
+    {
+      id: 'a-ack',
+      kind: 'message',
+      sessionId: 'now-dedupe-session',
+      createdAt: '2026-03-26T01:00:05.000Z',
+      payload: {
+        role: 'assistant',
+        text: 'Stored. Current task: reconnect hypergraph context engine. Next step: confirm scoped memory files are written ✅',
+      },
+    },
+  ];
+
+  const routed = routeLayeredMemory({
+    sessionId: 'now-dedupe-session',
+    agentId: 'main',
+    workspaceId: '/workspace/hypergraph',
+    now,
+    reason: 'turn_end',
+    nodes,
+    taskState: {
+      ...materializeTaskState('now-dedupe-session', nodes, []),
+      sessionId: 'now-dedupe-session',
+      intent: 'Current task: reconnect hypergraph context engine. Next step: confirm scoped memory files are written.',
+      openLoops: ['confirm scoped memory files are written ✅ (complete)'],
+      priorityBacklog: ['confirm scoped memory files are written'],
+      lastUpdatedAt: now,
+    },
+  });
+
+  assert.equal(routed.nowState.currentTask, 'reconnect hypergraph context engine');
+  assert.deepEqual(routed.nowState.blockers, []);
+  assert.deepEqual(routed.nowState.nextSteps, ['confirm scoped memory files are written']);
+});
+
 function createMemoryNode(
   relativePath: string,
   layer: MemoryChunkPayload['layer'],
@@ -934,6 +1078,9 @@ function createMemoryNode(
       sourceFile: relativePath,
       title,
       summary,
+      abstract: title,
+      overview: `${title}: ${summary}`,
+      detail: `${title}: ${summary}`,
       text: summary,
       dedupeKey: relativePath.replace(/[/.]+/g, '-'),
       persistence: layer === 'cold' ? 'long_term' : 'project',

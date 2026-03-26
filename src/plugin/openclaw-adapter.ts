@@ -48,6 +48,7 @@ export interface OpenClawHypergraphAdapterOptions {
   flushOnAfterTurn?: boolean;
   flushOnCompact?: boolean;
   promoteOnMaintenance?: boolean;
+  maintenanceMinIntervalMs?: number;
   runtimeIdentityDebug?: boolean;
 }
 
@@ -159,6 +160,7 @@ function toEngineOptions(options: OpenClawHypergraphAdapterOptions): HypergraphC
     flushOnAfterTurn: options.flushOnAfterTurn,
     flushOnCompact: options.flushOnCompact,
     promoteOnMaintenance: options.promoteOnMaintenance,
+    maintenanceMinIntervalMs: options.maintenanceMinIntervalMs,
     runtimeIdentityDebug: options.runtimeIdentityDebug,
   };
 }

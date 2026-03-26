@@ -168,7 +168,7 @@ export function extractNodes(sessionId: string, entry: TranscriptEntryLike): Bas
     });
   }
 
-  const openLoopText = extractOpenLoopText(normalizedText);
+  const openLoopText = extractOpenLoopText(normalizedText, entry);
   if (openLoopText && !looksLikePriorityList(normalizedText)) {
     nodes.push({
       id: `${transcriptId}:open-loop`,
@@ -605,8 +605,8 @@ function matchesAny(patterns: RegExp[], text: string): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
-function extractOpenLoopText(text: string): string | undefined {
-  if (!matchesOpenLoopPattern(text)) {
+function extractOpenLoopText(text: string, entry?: TranscriptEntryLike): string | undefined {
+  if (!matchesOpenLoopPattern(text, entry)) {
     return undefined;
   }
 
@@ -671,8 +671,12 @@ function stripRuntimeScaffolding(value: string): string {
     .trim();
 }
 
-function matchesOpenLoopPattern(text: string): boolean {
+function matchesOpenLoopPattern(text: string, entry?: TranscriptEntryLike): boolean {
   if (looksLikeMemoryRecallMessage(text)) {
+    return false;
+  }
+
+  if (entry?.role === 'assistant' && looksLikeAssistantCompletionEcho(text)) {
     return false;
   }
 
@@ -689,6 +693,18 @@ function matchesOpenLoopPattern(text: string): boolean {
 
 function looksLikeMemoryRecallMessage(text: string): boolean {
   return looksLikeRecallIntent(stripRuntimeScaffolding(text));
+}
+
+function looksLikeAssistantCompletionEcho(text: string): boolean {
+  const normalized = stripRuntimeScaffolding(text).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(stored|saved|remembered|confirmed)\b/.test(normalized)
+    || /\bconfirmed written\b/.test(normalized)
+    || /\balready complete\b/.test(normalized)
+    || (/\bcurrent task\b/.test(normalized) && /\bnext step\b/.test(normalized) && /✅|✔️|☑️/u.test(text));
 }
 
 function looksLikePriorityList(text: string): boolean {

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -478,7 +478,52 @@ async function main() {
       scenario: 'query-gate-read-modes',
       sessionHotOnlyLayers: sessionHotOnly.entries.map((entry) => entry.layer),
       sessionHotOnlySessionIds: sessionHotOnly.entries.map((entry) => entry.lastSessionId),
+      sessionHotOnlyDetailLevels: sessionHotOnly.entries.map((entry) => entry.selectedDetailLevel),
       transcriptOnlyCount: transcriptOnly.entries.length,
+    });
+  }
+
+  {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaw-runtime-detail-levels-'));
+    const repository = new WorkspaceMemoryRepository(tempDir);
+    const now = '2026-03-25T11:00:00.000Z';
+
+    repository.flush({
+      sessionId: 'detail-runtime-session',
+      agentId: 'detail-runtime-agent',
+      workspaceId: '/workspace/detail-runtime',
+      reason: 'manual_save',
+      nodes: [],
+      taskState: {
+        ...materializeTaskState('detail-runtime-session', [], []),
+        sessionId: 'detail-runtime-session',
+        intent: 'Current task: document the exact retrieval pipeline details.',
+        activeDecisions: ['Use L0 and L1 by default, then unlock L2 only for detail-seeking queries.'],
+        toolFacts: ['Detailed evidence should stay available when the query explicitly asks for it.'],
+        lastUpdatedAt: now,
+      },
+    });
+
+    const continuationRead = repository.read({
+      sessionId: 'detail-runtime-session',
+      agentId: 'detail-runtime-agent',
+      workspaceId: '/workspace/detail-runtime',
+      queryGateMode: 'session_hot_only',
+      queryText: 'What is the current task and next step?',
+    });
+    const detailRead = repository.read({
+      sessionId: 'detail-runtime-session',
+      agentId: 'detail-runtime-agent',
+      workspaceId: '/workspace/detail-runtime',
+      queryText: 'Show me the full implementation details and exact evidence for the retrieval pipeline.',
+    });
+
+    results.push({
+      scenario: 'detail-level-projection',
+      continuationLevels: continuationRead.entries.map((entry) => entry.selectedDetailLevel),
+      detailLevels: detailRead.entries.map((entry) => entry.selectedDetailLevel),
+      continuationUsesOnlyL0L1: continuationRead.entries.every((entry) => entry.selectedDetailLevel !== 'L2'),
+      detailQueryUnlocksL2: detailRead.entries.some((entry) => entry.selectedDetailLevel === 'L2'),
     });
   }
 
@@ -913,6 +958,82 @@ async function main() {
   }
 
   {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaw-runtime-maintain-throttle-'));
+    const store = new LayeredMemoryWorkspaceStore(tempDir);
+    const now = '2026-03-25T12:00:00.000Z';
+    const candidate = routeMemoryCandidate({
+      title: 'Current Task State',
+      summary: 'Throttle afterTurn maintenance rewrites',
+      category: 'current-task',
+      scope: 'task',
+      persistence: 'task',
+      recurrence: 3,
+      connectivity: 3,
+      activationEnergy: 'low',
+    });
+
+    store.writeFlush({
+      nowState: {
+        currentTask: 'Throttle maintenance rewrites',
+        currentPlan: [],
+        blockers: [],
+        nextSteps: [],
+        updatedAt: now,
+      },
+      entries: [{
+        ...candidate,
+        updatedAt: now,
+        firstSeenAt: '2026-03-20T12:00:00.000Z',
+        hitCount: 3,
+        sessionCount: 2,
+        lastSessionId: 'throttle-chat',
+        sourceFile: '',
+      }],
+      dailyAudit: ['seed maintenance throttle entry'],
+    });
+
+    const engine = await createEngine({
+      disablePersistence: true,
+      memoryWorkspaceRoot: tempDir,
+      enableLayeredRead: true,
+      enableLayeredWrite: false,
+      flushOnAfterTurn: false,
+      promoteOnMaintenance: true,
+      maintenanceMinIntervalMs: 60_000,
+    });
+
+    await engine.afterTurn({
+      sessionId: 'throttle-turn',
+      sessionKey: 'throttle-chat',
+      sessionFile: 'session.jsonl',
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+
+    const warmPath = join(tempDir, resolveMemoryRelativePath({
+      layer: 'warm',
+      category: 'current-task',
+      dedupeKey: candidate.dedupeKey,
+      lastSessionId: 'throttle-chat',
+    }));
+    const firstMtimeMs = statSync(warmPath).mtimeMs;
+
+    await engine.afterTurn({
+      sessionId: 'throttle-turn',
+      sessionKey: 'throttle-chat',
+      sessionFile: 'session.jsonl',
+      messages: [],
+      prePromptMessageCount: 0,
+    });
+
+    results.push({
+      scenario: 'maintenance-throttle',
+      warmExists: existsSync(warmPath),
+      rewriteSkippedOnImmediateSecondTurn: statSync(warmPath).mtimeMs === firstMtimeMs,
+    });
+  }
+
+  {
     const tempDir = mkdtempSync(join(tmpdir(), 'openclaw-runtime-maintain-now-'));
     const store = new LayeredMemoryWorkspaceStore(tempDir);
     const repository = new WorkspaceMemoryRepository(tempDir);
@@ -1030,6 +1151,9 @@ function createNamespacedMemoryNode(
       sourceFile: relativePath,
       title,
       summary,
+      abstract: title,
+      overview: `${title}: ${summary}`,
+      detail: `${title}: ${summary}`,
       text: summary,
       dedupeKey: relativePath.replace(/[/.]+/g, '-'),
       persistence: layer === 'cold' ? 'long_term' : 'project',

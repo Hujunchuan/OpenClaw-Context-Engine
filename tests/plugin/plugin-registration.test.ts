@@ -240,6 +240,57 @@ test('plugin ingestBatch ignores plugin-injected runtime context messages', asyn
   assert.match(assembled.systemPromptAddition ?? '', /no session snapshot yet|fallback/i);
 });
 
+test('plugin ignores synthetic hook-bridge context text even when runtime does not preserve source metadata', async () => {
+  const registrations: Array<{ id: string; factory: (runtimeConfig?: unknown) => unknown | Promise<unknown> }> = [];
+
+  register({
+    registerContextEngine(id, factory) {
+      registrations.push({ id, factory });
+    },
+  });
+
+  const engine = await registrations[0]!.factory({
+    disablePersistence: true,
+  }) as {
+    assemble: Function;
+  };
+
+  const bridgeMessage = {
+    id: 'bridge-1',
+    role: 'user',
+    content: `[Hypergraph Context Bridge]
+
+HypergraphContextEngine fallback assemble: no session snapshot yet, using empty task state.
+
+Recovered context:
+- user: Current task: stale bridge text should not be persisted.`,
+    createdAt: '2026-03-26T00:00:00.000Z',
+  };
+  const userMessage = {
+    id: 'u1',
+    role: 'user',
+    content: 'Current task: reconnect hypergraph context engine. Next step: confirm scoped memory files are written.',
+    createdAt: '2026-03-26T00:00:05.000Z',
+  };
+
+  const assembled = await engine.assemble({
+    sessionId: 'hook-bridge-filter-session',
+    sessionKey: 'hook-bridge-filter-session',
+    messages: [bridgeMessage, userMessage],
+    tokenBudget: 320,
+  });
+
+  assert.equal(
+    assembled.messages.some((message: Record<string, unknown>) => message.id === 'bridge-1'),
+    false,
+  );
+  assert.ok(
+    assembled.messages.some((message: Record<string, unknown>) => message.id === 'u1'),
+  );
+  assert.match(assembled.systemPromptAddition ?? '', /reconnect hypergraph context engine/i);
+  assert.doesNotMatch(assembled.systemPromptAddition ?? '', /stale bridge text should not be persisted/i);
+});
+
 test('plugin assemble keeps real previous user dialogue available for follow-up questions', async () => {
   const registrations: Array<{ id: string; factory: (runtimeConfig?: unknown) => unknown | Promise<unknown> }> = [];
 
@@ -569,8 +620,8 @@ test('plugin runtime config flushOnAfterTurn controls whether afterTurn writes l
     prePromptMessageCount: 0,
   });
 
-  assert.equal(existsSync(join(flushOnDir, 'NOW.md')), true);
-  assert.equal(existsSync(join(flushOffDir, 'NOW.md')), false);
+  assert.equal(existsSync(join(flushOnDir, '.hypergraph-memory', 'session', 'turn-1', 'SESSION_NOW.md')), true);
+  assert.equal(existsSync(join(flushOffDir, '.hypergraph-memory', 'session', 'turn-1', 'SESSION_NOW.md')), false);
 });
 
 test('plugin runtime identity debug writes canonical namespace diagnostics using explicit session ids', async () => {
@@ -643,7 +694,7 @@ test('legacy context-engine registration falls back to pluginConfig when runtime
     prePromptMessageCount: 0,
   });
 
-  assert.equal(existsSync(join(tempDir, 'NOW.md')), true);
+  assert.equal(existsSync(join(tempDir, '.hypergraph-memory', 'session', 'turn-1', 'SESSION_NOW.md')), true);
 });
 
 test('plugin runtime config disablePersistence controls cross-instance resume behavior', async () => {
@@ -773,7 +824,7 @@ test('plugin can register an OpenClaw hook bridge and prepend assembled context'
     },
   );
 
-  assert.equal(existsSync(join(tempDir, 'NOW.md')), true);
+  assert.equal(existsSync(join(tempDir, '.hypergraph-memory', 'session', 'hook-chat', 'SESSION_NOW.md')), true);
 
   const beforeCompaction = hooks.get('before_compaction')!;
   await beforeCompaction(

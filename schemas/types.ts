@@ -40,6 +40,11 @@ export type MemoryScope =
   | 'user'
   | 'system';
 
+export type ContextDetailLevel =
+  | 'L0'
+  | 'L1'
+  | 'L2';
+
 export type FlushReason =
   | 'turn_end'
   | 'tool_complete'
@@ -71,6 +76,10 @@ export interface MemoryChunkPayload extends Record<string, unknown> {
   sourceFile: string;
   title: string;
   summary: string;
+  abstract: string;
+  overview: string;
+  detail?: string;
+  selectedDetailLevel?: ContextDetailLevel;
   text?: string;
   category?: string;
   routeReason?: string;

@@ -47,6 +47,10 @@
         "type": "boolean",
         "description": "Re-hydrate and apply lifecycle maintenance during afterTurn."
       },
+      "maintenanceMinIntervalMs": {
+        "type": "number",
+        "description": "Minimum delay between afterTurn maintenance runs for the same session to avoid rewriting layered memory every turn."
+      },
       "runtimeIdentityDebug": {
         "type": "boolean",
         "description": "Append debug-only runtime identity diagnostics so real OpenClaw namespace alignment can be inspected during integration testing."
